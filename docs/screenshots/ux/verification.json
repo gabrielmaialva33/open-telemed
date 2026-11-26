@@ -1,0 +1,54 @@
+{
+  "origin": "http://localhost:3333",
+  "widths": [390, 1280],
+  "screenshots": [
+    "login-1280.png",
+    "login-390.png",
+    "patient-camera-1280.png",
+    "patient-camera-390.png",
+    "patient-consent-1280.png",
+    "patient-consent-390.png",
+    "patient-waiting-1280.png",
+    "patient-waiting-390.png",
+    "aurora-home-1280.png",
+    "aurora-home-390.png",
+    "aurora-menu-390.png",
+    "aurora-consultations-1280.png",
+    "aurora-consultations-390.png",
+    "aurora-detail-1280.png",
+    "aurora-detail-390.png",
+    "aurora-clinic-1280.png",
+    "aurora-clinic-390.png",
+    "aurora-professionals-1280.png",
+    "aurora-professionals-390.png",
+    "aurora-home-doctor-1280.png",
+    "aurora-home-doctor-390.png",
+    "aurora-waiting-room-1280.png",
+    "aurora-waiting-room-390.png",
+    "aurora-room-1280.png",
+    "aurora-room-390.png",
+    "patient-video-1280.png",
+    "patient-video-390.png",
+    "aurora-closing-1280.png",
+    "aurora-closing-390.png",
+    "horizonte-waiting-room-1280.png",
+    "horizonte-waiting-room-390.png",
+    "horizonte-room-1280.png",
+    "horizonte-room-390.png"
+  ],
+  "brands": [
+    {
+      "clinic": "aurora",
+      "primary": "#0f766e"
+    },
+    {
+      "clinic": "horizonte",
+      "primary": "#6d48a5"
+    }
+  ],
+  "pageErrors": [],
+  "media": "Chromium fake camera/microphone, two decoded video tracks per participant",
+  "horizontalOverflow": false,
+  "fixedHeaderOverlap": false,
+  "brandMeasurement": "Computed --lk-accent-bg on .video-room [data-lk-theme]"
+}

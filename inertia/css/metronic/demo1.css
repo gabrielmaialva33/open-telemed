@@ -1,0 +1,88 @@
+/* Derivado do Metronic v9.5.0 (Keenthemes), licença comercial: não redistribuir. */
+@layer theme, base, components, utilities;
+
+@layer components {
+  /* Variables */
+  .demo1 {
+    --sidebar-transition-duration: 0.3s;
+    --sidebar-transition-timing: ease;
+    --sidebar-width: 280px;
+    --sidebar-width-collapse: 80px;
+    --sidebar-default-width: 280px;
+    --header-height: 70px;
+  }
+
+  @media (max-width: 1024px) {
+    .demo1 {
+      --sidebar-width: 280px;
+      --header-height: 60px;
+    }
+  }
+
+  /* Base */
+  .demo1 .header {
+    height: var(--header-height);
+  }
+
+  .demo1 .sidebar {
+    width: var(--sidebar-width);
+  }
+
+  .demo1.header-fixed .wrapper {
+    padding-top: var(--header-height);
+  }
+
+  /* Desktop mode */
+  @media (min-width: 1024px) {
+    .demo1 .sidebar {
+      width: var(--sidebar-width);
+      transition: width var(--sidebar-transition-duration) var(--sidebar-transition-timing);
+    }
+
+    .demo1 .sidebar .sidebar-header {
+      height: var(--header-height);
+    }
+
+    .demo1 .sidebar .sidebar-wrapper {
+      width: var(--sidebar-default-width);
+    }
+
+    .demo1 .sidebar .sidebar-logo {
+      width: var(--sidebar-default-width);
+    }
+
+    .demo1 .sidebar .small-logo {
+      display: none;
+    }
+
+    .demo1.sidebar-fixed .wrapper {
+      padding-inline-start: var(--sidebar-width) !important;
+    }
+
+    .demo1.sidebar-fixed.header-fixed .header {
+      inset-inline-start: var(--sidebar-width) !important;
+    }
+
+    .demo1.sidebar-fixed.header-fixed .wrapper {
+      padding-top: var(--header-height);
+    }
+
+    .demo1.sidebar-collapse {
+      --sidebar-width: var(--sidebar-width-collapse);
+    }
+
+    .demo1.sidebar-collapse .sidebar {
+      transition: width var(--sidebar-transition-duration) var(--sidebar-transition-timing);
+    }
+  }
+
+  .demo1.layout-initialized .wrapper {
+    transition: padding-inline-start var(--sidebar-transition-duration)
+      var(--sidebar-transition-timing);
+  }
+
+  .demo1.layout-initialized .header {
+    transition: inset-inline-start var(--sidebar-transition-duration)
+      var(--sidebar-transition-timing);
+  }
+}

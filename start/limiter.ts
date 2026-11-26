@@ -1,0 +1,234 @@
+import { createHash } from 'node:crypto'
+import limiter from '@adonisjs/limiter/services/main'
+
+/** Bound every request-derived key component, including forwarded client addresses. */
+function requestDigest(ip: string, identity?: string) {
+  const parts = identity === undefined ? [ip] : [ip, identity.trim().toLowerCase()]
+  return createHash('sha256').update(JSON.stringify(parts)).digest('hex')
+}
+
+/**
+ * Global throttle for general API endpoints
+ * - 60 requests per minute for authenticated users
+ * - 20 requests per minute for guest users
+ */
+export const throttle = limiter.define('global', async (ctx) => {
+  /**
+   * More lenient rate limit for authenticated users
+   */
+  try {
+    await ctx.auth.check()
+    if (ctx.auth.user) {
+      return limiter.allowRequests(60).every('1 minute').usingKey(`user_${ctx.auth.user.id}`)
+    }
+  } catch {
+    // User is not authenticated
+  }
+
+  /**
+   * Stricter rate limit for guest users
+   */
+  return limiter
+    .allowRequests(20)
+    .every('1 minute')
+    .usingKey(`ip_${requestDigest(ctx.request.ip())}`)
+})
+
+/**
+ * Strict throttle for authentication endpoints
+ * - 5 attempts per 15 minutes by IP + email combination
+ * - Blocks for 30 minutes after exhausting attempts
+ */
+export const authThrottle = limiter.define('auth', (ctx) => {
+  const uid = String(ctx.request.input('uid') || ctx.request.input('email') || 'unknown')
+
+  return limiter
+    .allowRequests(5)
+    .every('15 minutes')
+    .blockFor('30 minutes')
+    .usingKey(`auth_${requestDigest(ctx.request.ip(), uid)}`)
+    .limitExceeded((error) => {
+      const i18n = ctx.i18n
+      if (i18n) {
+        error.setMessage(i18n.t('errors.too_many_auth_attempts'))
+      } else {
+        error.setMessage('Too many authentication attempts. Please try again later.')
+      }
+    })
+})
+
+export const passwordResetRequestThrottle = limiter.define('password-reset-request', (ctx) => {
+  const email = String(ctx.request.input('email') ?? 'unknown')
+
+  return limiter
+    .allowRequests(5)
+    .every('15 minutes')
+    .blockFor('30 minutes')
+    .usingKey(`password_reset_request_${requestDigest(ctx.request.ip(), email)}`)
+    .limitExceeded((error) => {
+      error.setMessage('Too many password reset requests. Please try again later.')
+    })
+})
+
+export const passwordResetThrottle = limiter.define('password-reset', (ctx) => {
+  return limiter
+    .allowRequests(10)
+    .every('15 minutes')
+    .blockFor('30 minutes')
+    .usingKey(`password_reset_${requestDigest(ctx.request.ip())}`)
+    .limitExceeded((error) => {
+      error.setMessage('Too many password reset attempts. Please try again later.')
+    })
+})
+
+/**
+ * API throttle for protected API endpoints
+ * - 100 requests per minute for authenticated users
+ * - 10 requests per minute for guest users
+ */
+export const apiThrottle = limiter.define('api', async (ctx) => {
+  /**
+   * Higher rate limit for authenticated API users
+   */
+  try {
+    const isAuthenticated = await ctx.auth.check()
+
+    // Check if user is authenticated and has a valid user object
+    if (isAuthenticated && ctx.auth.user) {
+      return limiter.allowRequests(100).every('1 minute').usingKey(`api_user_${ctx.auth.user.id}`)
+    }
+  } catch {
+    // User is not authenticated - continue to guest rate limit
+  }
+
+  /**
+   * Lower rate limit for unauthenticated API requests
+   */
+  return limiter
+    .allowRequests(10)
+    .every('1 minute')
+    .usingKey(`api_ip_${requestDigest(ctx.request.ip())}`)
+})
+
+/**
+ * Upload throttle for file upload endpoints
+ * - 10 uploads per hour for authenticated users
+ * - Blocks for 1 hour after exhausting attempts
+ */
+export const uploadThrottle = limiter.define('upload', async (ctx) => {
+  try {
+    const isAuthenticated = await ctx.auth.check()
+
+    // Check if user is authenticated and has a valid user object
+    if (!isAuthenticated || !ctx.auth.user) {
+      return limiter
+        .allowRequests(0)
+        .every('1 minute')
+        .limitExceeded((error) => {
+          const i18n = ctx.i18n
+          if (i18n) {
+            error.setMessage(i18n.t('errors.authentication_required'))
+          } else {
+            error.setMessage('Authentication required for uploads')
+          }
+        })
+    }
+  } catch {
+    return limiter
+      .allowRequests(0)
+      .every('1 minute')
+      .limitExceeded((error) => {
+        const i18n = ctx.i18n
+        if (i18n) {
+          error.setMessage(i18n.t('errors.authentication_required'))
+        } else {
+          error.setMessage('Authentication required for uploads')
+        }
+      })
+  }
+
+  return limiter
+    .allowRequests(10)
+    .every('1 hour')
+    .blockFor('1 hour')
+    .usingKey(`upload_user_${ctx.auth.user.id}`)
+    .limitExceeded((error) => {
+      const i18n = ctx.i18n
+      if (i18n) {
+        error.setMessage(i18n.t('errors.upload_limit_exceeded'))
+      } else {
+        error.setMessage('Upload limit exceeded. Please try again in an hour.')
+      }
+    })
+})
+
+/**
+ * Admin throttle for administrative endpoints
+ * - 200 requests per minute
+ * - Only for authenticated admin/root users
+ */
+export const adminThrottle = limiter.define('admin', async (ctx) => {
+  try {
+    const isAuthenticated = await ctx.auth.check()
+
+    // Check if user is authenticated and has a valid user object
+    if (!isAuthenticated || !ctx.auth.user) {
+      return limiter
+        .allowRequests(0)
+        .every('1 minute')
+        .limitExceeded((error) => {
+          const i18n = ctx.i18n
+          if (i18n) {
+            error.setMessage(i18n.t('errors.authentication_required'))
+          } else {
+            error.setMessage('Authentication required')
+          }
+        })
+    }
+  } catch {
+    return limiter
+      .allowRequests(0)
+      .every('1 minute')
+      .limitExceeded((error) => {
+        const i18n = ctx.i18n
+        if (i18n) {
+          error.setMessage(i18n.t('errors.authentication_required'))
+        } else {
+          error.setMessage('Authentication required')
+        }
+      })
+  }
+
+  return limiter.allowRequests(200).every('1 minute').usingKey(`admin_user_${ctx.auth.user.id}`)
+})
+
+/** Bound distributed usernames at one source IP as well as each identity. */
+export const authIpThrottle = limiter.define('auth-ip', (ctx) =>
+  limiter
+    .allowRequests(30)
+    .every('15 minutes')
+    .usingKey(`auth_ip_${requestDigest(ctx.request.ip())}`)
+)
+
+export const verificationThrottle = limiter.define('verification-resend', (ctx) =>
+  limiter.allowRequests(1).every('1 minute').usingKey(`verification_${ctx.auth.user!.id}`)
+)
+
+// Telemed routes have already selected their guard; do not re-authenticate with JWT.
+export const consultationThrottle = limiter.define('telemed-api', (ctx) =>
+  limiter.allowRequests(100).every('1 minute').usingKey(`telemed_api_${ctx.auth.user!.id}`)
+)
+export const patientThrottle = limiter.define('telemed-patient', (ctx) =>
+  limiter
+    .allowRequests(90)
+    .every('1 minute')
+    .usingKey(
+      `telemed_patient_${requestDigest(ctx.request.ip(), String(ctx.request.cookie(`telemed_patient_${ctx.request.qs().consultation_id}`) || 'anonymous'))}`
+    )
+)
+export const patientLinkThrottle = limiter.define('telemed-link', (ctx) =>
+  limiter
+    .allowRequests(15)
+    .every('1 minute')
+    .usingKey(`telemed_link_${requestDigest(ctx.request.ip())}`)
+)
