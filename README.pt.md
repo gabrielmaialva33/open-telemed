@@ -68,7 +68,7 @@ backend; o painel do open-telemed fica para operação da plataforma.
 | **Vídeo**    | LiveKit SFU 1.13 (self-hosted) ou LiveKit Cloud, WebRTC                          |
 | **Dados**    | PostgreSQL e Redis (cache, rate limit e fila)                                    |
 | **API**      | Redoc em `/docs` e spec em [`docs/openapi.yaml`](docs/openapi.yaml)              |
-| **Base**     | [adonis-web-kit](LICENSE-adonis-web-kit-MIT): auth, tenants N:N, RBAC, auditoria |
+| **Base**     | [adonis-web-kit](https://github.com/gabrielmaialva33/adonis-web-kit): auth, tenants N:N, RBAC, auditoria |
 | **Regras**   | [`docs/brazil-telemedicine-rules.pt.md`](docs/brazil-telemedicine-rules.pt.md)   |
 
 ### A vida de uma consulta
@@ -282,7 +282,7 @@ Todas as variáveis são validadas no boot por [`start/env.ts`](start/env.ts). A
 | `WEBHOOK_ALLOWED_ORIGINS`                              | Origens de webhook liberadas pelo operador (a clínica não libera)                                 |
 | `REGISTRATION_WORKSPACE_MODE`                          | `none`: clínica e médico entram por convite ou pelo administrador                                 |
 
-As do kit (`APP_*`, segredos de token, `DB_*`, `REDIS_*`, `SMTP_*`) seguem o [adonis-web-kit](LICENSE-adonis-web-kit-MIT).
+As do kit (`APP_*`, segredos de token, `DB_*`, `REDIS_*`, `SMTP_*`) seguem o [adonis-web-kit](https://github.com/gabrielmaialva33/adonis-web-kit).
 
 > [!CAUTION]
 > `devkey`/`secret` do LiveKit e os placeholders do `docker-compose.yml` são de desenvolvimento. Em produção, use
@@ -320,7 +320,7 @@ com o primeiro integrador está em [`docs/clinicafacil-integration.pt.md`](docs/
 ## Licença
 
 O código do open-telemed é **AGPL-3.0-only** ([`LICENSE`](LICENSE)). Parte dele vem do
-[adonis-web-kit](LICENSE-adonis-web-kit-MIT), sob MIT.
+[adonis-web-kit](https://github.com/gabrielmaialva33/adonis-web-kit), sob MIT.
 
 > [!WARNING]
 > O layout do painel deriva do **Metronic v9.5.0**, que tem licença comercial e **não** é coberto pela AGPL. Os arquivos
