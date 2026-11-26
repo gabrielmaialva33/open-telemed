@@ -37,18 +37,19 @@ _"The patient taps the link, accepts the consent form and waits. The doctor admi
 > account**: they test camera and microphone, accept a versioned consent form, wait in the waiting room and only join the
 > video once the doctor admits them. The flow follows Brazil's **Resolução CFM 2.314/2022** (Federal Council of
 > Medicine telemedicine rules), **Lei 14.510/2022** (telehealth law) and the **LGPD** (data protection law). Video runs
-> on a self-hosted **LiveKit**, with no clinical data going through it. **Pre-1.0** (`0.1.0`).
+> on **LiveKit**, self-hosted or Cloud, with no clinical data going through it. **Pre-1.0** (`0.1.0`).
 
 ---
 
 ## Overview
 
 open-telemed is not an electronic health record. It does one thing well, the teleconsultation room, and hands the
-record to the clinic's own system through an API and webhooks.
+record to the clinic's own system through an API and webhooks. In headless mode, the integrator owns both interfaces
+and calls the engine through its backend; the open-telemed panel stays for platform operations.
 
 <table>
   <tr>
-    <td width="33%" valign="top"><h3>🎥 1:1 video on LiveKit</h3>One room per appointment, two people at most, prefixed with the clinic. Tokens last 60 s and open only that room. Metadata carries only the role, and ending the appointment deletes the room.</td>
+    <td width="33%" valign="top"><h3>🎥 1:1 video on LiveKit</h3>One room per appointment, two people at most, prefixed with the clinic. Initial tokens last 60 s and open only that room. Metadata carries only the role, and ending schedules room closure with recovery on failure.</td>
     <td width="33%" valign="top"><h3>🏥 Multi-clinic and white label</h3>The clinic is resolved from the <code>Host</code> and its own domains: its logo, colors (video included) and title. The footer shows legal name, CNPJ, CRM-PJ and medical director.</td>
     <td width="33%" valign="top"><h3>📝 Consent the way CFM requires</h3>An immutable consent text, versioned per clinic. Acceptance stores version, hash, timestamp, IP, user agent and legal guardian. Recording is a separate choice and is off by default.</td>
   </tr>
@@ -65,7 +66,7 @@ record to the clinic's own system through an API and webhooks.
 | **Runtime**  | Node.js 24 LTS (`.nvmrc`), pnpm 11 (`packageManager`)                            |
 | **Backend**  | AdonisJS 7, Lucid, VineJS, Bull Queue, `livekit-server-sdk`                      |
 | **Frontend** | React 19, Inertia 3, Tailwind CSS 4, `@livekit/components-react`                 |
-| **Video**    | LiveKit SFU 1.13 (self-hosted), WebRTC                                           |
+| **Video**    | LiveKit SFU 1.13 (self-hosted) or LiveKit Cloud, WebRTC                          |
 | **Data**     | PostgreSQL and Redis (cache, rate limiting and queue)                            |
 | **API**      | Redoc at `/docs`, spec in [`docs/openapi.yaml`](docs/openapi.yaml)               |
 | **Base**     | [adonis-web-kit](LICENSE-adonis-web-kit-MIT): auth, N:N tenants, RBAC, audit log |
@@ -100,6 +101,7 @@ sequenceDiagram
     participant P as Patient
     participant D as Doctor
     participant LK as LiveKit
+    Note over I,OT: Headless: patient and doctor use the integrator UI/backend; doctor_url is null
     I->>OT: POST /api/v1/consultations
     OT-->>I: patient_url + doctor_url
     I->>P: sends the link (WhatsApp, email...)
@@ -113,7 +115,7 @@ sequenceDiagram
     P->>LK: video
     D->>LK: video
     D->>OT: End + outcome
-    OT->>LK: deletes the room
+    OT->>LK: closes the room (durable retry on failure)
     OT-->>I: signed webhook (status, outcome)
 ```
 
@@ -154,15 +156,16 @@ service user and one appointment. It prints the logins, patient links and integr
 The backend is organized **by domain**. Each module lives in `app/modules/<domain>/`, follows controller → service →
 repository → model and registers its own `routes.ts`.
 
-| Module                                  | Owns                                                                    |
-| :-------------------------------------- | :---------------------------------------------------------------------- |
-| `consultations`                         | Appointment, patient link, doctor room, integrator API and webhooks     |
-| `consents`                              | Versioned consent texts and acceptances                                 |
-| `professionals`                         | Professional profile (CRM, UF and RQE) and clinic settings              |
-| `tenants`                               | Clinic: brand, domains, legal details and public resolution from `Host` |
-| `audits`                                | Append-only audit trail                                                 |
-| `auth`, `users`, `roles`, `permissions` | Accounts, JWT, RBAC and ownership checks (from the kit)                 |
-| `web`                                   | Inertia pages for the panel and the patient                             |
+| Module                                  | Owns                                                                         |
+| :-------------------------------------- | :--------------------------------------------------------------------------- |
+| `consultations`                         | Appointment, patient link, doctor room, integrator API and webhooks          |
+| `headless`                              | Delegated doctor authorization, patient API and trusted integration mappings |
+| `consents`                              | Versioned consent texts and acceptances                                      |
+| `professionals`                         | Professional profile (CRM, UF and RQE) and clinic settings                   |
+| `tenants`                               | Clinic: brand, domains, legal details and public resolution from `Host`      |
+| `audits`                                | Append-only audit trail                                                      |
+| `auth`, `users`, `roles`, `permissions` | Accounts, JWT, RBAC and ownership checks (from the kit)                      |
+| `web`                                   | Inertia pages for the panel and the patient                                  |
 
 Video lives in `app/shared/services/video_service.ts`. Imports use the `#modules/*` and `#shared/*` aliases, never
 `../../`.
@@ -173,7 +176,7 @@ Video lives in `app/shared/services/video_service.ts`. Imports use the `#modules
 | :------------- | :------------------------------------------------------------------------------------------------------------------------------------------ |
 | `clinic_owner` | Configure brand, legal details, consent text and webhook. Register professionals and appointments. See the whole clinic, but **not attend** |
 | `doctor`       | See and attend **their own** appointments: admit, join the video and end                                                                    |
-| `integrator`   | Use the API with a service token: create, read, cancel and audit appointments                                                               |
+| `integrator`   | Use the API to create, read, cancel and audit appointments, and carry headless requests; a service token alone **cannot attend**            |
 
 ## Brazilian rules → product
 
@@ -192,7 +195,7 @@ This is not legal advice: a healthcare lawyer reviews it before production.
 ## Integrator API
 
 Authenticate with `Authorization: Bearer <service token>`, the API token of a clinic service user. A resource from
-another clinic answers **404**.
+another clinic answers **404**. Send the mapped `X-Tenant-Id`; membership and token abilities are checked.
 
 | Route                                   | Does                                               |
 | :-------------------------------------- | :------------------------------------------------- |
@@ -201,11 +204,17 @@ another clinic answers **404**.
 | `POST /api/v1/consultations/:id/cancel` | Cancels before the appointment starts              |
 | `GET /api/v1/consultations/:id/audit`   | Audit trail                                        |
 
+The GET record includes `professional_snapshot` (doctor identity frozen at admission or an explicit no-show decision)
+and `outcome_author` (doctor, patient or system attribution). It is an attributed encounter export, not a digitally signed
+clinical document. `video_closure` separately reports pending/completed closure, mode, attempts and `tokens_revoked`;
+clinical completion does not prove media revocation.
+
 The full list and payloads are in [`docs/openapi.yaml`](docs/openapi.yaml) and at `/docs`.
 
 **Webhooks.** Every status change goes out as a JSON POST signed with HMAC-SHA256 (`X-OpenTelemed-Signature`), with up
-to 6 attempts and exponential backoff. Verify the signature over the **raw body**, deduplicate by `id` and tolerate
-out-of-order events. Delivery runs on the queue:
+to 6 attempts and exponential backoff. Verify it over **`X-OpenTelemed-Timestamp + '.' + raw body`**, check the timestamp
+within ±300 seconds and deduplicate by `event_id` (`id` is its legacy alias). Reconcile out-of-order events by consultation
+`revision`. Delivery runs on the queue:
 
 ```bash
 pnpm ace queue:listen --queue=consultation-webhooks
@@ -214,19 +223,65 @@ pnpm ace telemed:dispatch-webhooks   # recovers events that never reached the qu
 
 LiveKit reports joins and leaves to `POST /webhooks/livekit`, verified with its `WebhookReceiver`.
 
+### Headless mode
+
+Clínica Fácil or another integrator renders the doctor and patient flows **in its own interface and domain**, without
+an open-telemed login or brand. Its backend-for-frontend (BFF) calls these APIs; the doctor keeps the integrator's login,
+and the patient still needs no account. The engine endpoints are implemented; the integrator builds its own UI/BFF.
+Configured clinics receive their own frontend `patient_url` and `doctor_url: null`.
+
+| Route                                          | Does                                                                          |
+| :--------------------------------------------- | :---------------------------------------------------------------------------- |
+| `POST /api/v1/headless/doctor/:id/state`       | Reads the assigned doctor's consultation record.                              |
+| `POST /api/v1/headless/doctor/:id/admit`       | Admits a consenting patient and freezes doctor identity.                      |
+| `POST /api/v1/headless/doctor/:id/video-token` | Issues the doctor's scoped LiveKit token after admission.                     |
+| `POST /api/v1/headless/doctor/:id/end`         | Ends with the signed outcome, records authorship and schedules video closure. |
+| `POST /api/v1/headless/patient/session`        | Exchanges the link secret for patient state and an opaque session secret.     |
+| `POST /api/v1/headless/patient/state`          | Reads patient state and the displayed consent term.                           |
+| `POST /api/v1/headless/patient/consent`        | Records explicit versioned consent and enters waiting.                        |
+| `POST /api/v1/headless/patient/video-token`    | Issues the patient's scoped LiveKit token after consent and admission.        |
+| `POST /api/v1/headless/patient/decline`        | Records patient refusal and schedules video closure.                          |
+
+All calls require the configured clinic service token, `X-Tenant-Id` and the matching
+`consultations.headless_doctor` or `consultations.headless_patient` ability and permission. Each doctor action also sends
+`{assertion}`: a **single-use RS256 JWT, valid for ≤60 seconds**, bound to the mapped doctor (`sub`), consultation and
+action, with `iss`, `aud: telemed:doctor-action`, `jti`, `iat` and `exp`. For `end`, the outcome is signed too. The engine
+pins the issuer/public key, consumes the nonce atomically and rechecks the assigned doctor's membership and permissions;
+a manager or service account cannot impersonate them.
+
+Patient calls after `/session` require `?consultation_id=...` and `X-Patient-Session`. Keep the engine session secret
+server-side behind an HttpOnly cookie; never expose service credentials or doctor assertions to the browser. Consent also
+carries verified `client_ip` and `client_user_agent` evidence. The integrator can use `@livekit/components-react` with the
+returned video tokens inside its own layout.
+
+Configure the trusted backend and verified doctor mapping with the operator commands (illustrative values):
+
+```bash
+pnpm ace permission:sync
+pnpm ace telemed:configure-headless --tenant-id=7 --service-user-id=20 --issuer=clinicafacil-unit-7 --public-key-file=clinic-public.pem --patient-url=https://clinic.example/teleconsulta
+pnpm ace telemed:map-doctor --tenant-id=7 --professional-id=42 --subject=doctor-314
+pnpm ace telemed:prune-assertions   # schedule cleanup of expired replay markers
+pnpm ace telemed:close-videos      # retry pending closures every minute
+```
+
+LiveKit Cloud with explicit revocation cutoff is recommended for terminal token revocation. In `self_hosted` mode,
+room closure does not revoke cached tokens and `tokens_revoked` stays false. Real Cloud enforcement still needs deployment
+qualification. See the [integration contract](docs/clinicafacil-integration.md) and [headless report](docs/headless-report.md).
+
 ## Configuration
 
 [`start/env.ts`](start/env.ts) validates every variable at boot. The ones specific to open-telemed:
 
-| Variable                                               | Purpose                                                        |
-| :----------------------------------------------------- | :------------------------------------------------------------- |
-| `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | LiveKit server and the credentials that sign tokens            |
-| `LIVEKIT_NODE_IP`                                      | IP LiveKit advertises to browsers (Compose)                    |
-| `PLATFORM_HOSTS`                                       | Platform hosts. Each clinic's own domains live in the database |
-| `TRUST_PROXY`                                          | Only behind a controlled proxy: honors `X-Forwarded-Host`      |
-| `CLINICAL_RETENTION_YEARS`                             | Minimum retention of the clinical record (default 20)          |
-| `WEBHOOK_ALLOWED_ORIGINS`                              | Webhook origins allowed by the operator (clinics cannot add)   |
-| `REGISTRATION_WORKSPACE_MODE`                          | `none`: clinics and doctors join by invitation or via an admin |
+| Variable                                               | Purpose                                                                                       |
+| :----------------------------------------------------- | :-------------------------------------------------------------------------------------------- |
+| `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | LiveKit server and the credentials that sign tokens                                           |
+| `LIVEKIT_REVOCATION_MODE`                              | `self_hosted` (default): room closure only; `cloud`: explicit token revocation before closure |
+| `LIVEKIT_NODE_IP`                                      | IP LiveKit advertises to browsers (Compose)                                                   |
+| `PLATFORM_HOSTS`                                       | Platform hosts. Each clinic's own domains live in the database                                |
+| `TRUST_PROXY`                                          | Only behind a controlled proxy: honors `X-Forwarded-Host`                                     |
+| `CLINICAL_RETENTION_YEARS`                             | Minimum retention of the clinical record (default 20)                                         |
+| `WEBHOOK_ALLOWED_ORIGINS`                              | Webhook origins allowed by the operator (clinics cannot add)                                  |
+| `REGISTRATION_WORKSPACE_MODE`                          | `none`: clinics and doctors join by invitation or via an admin                                |
 
 The kit's variables (`APP_*`, token secrets, `DB_*`, `REDIS_*`, `SMTP_*`) follow
 [adonis-web-kit](LICENSE-adonis-web-kit-MIT).
@@ -251,6 +306,9 @@ pnpm test:ui          # frontend Vitest
 | **functional** | `tests/functional/telemed/` | Clinic isolation, consent, confidentiality, webhooks, `Host`   |
 | **browser**    | `tests/browser/telemed/`    | Patient consents → waits → doctor admits → both see each other |
 | **frontend**   | `inertia/tests/telemed/`    | Consent form, patient steps, role-based controls               |
+
+Latest recorded gate: **279 backend/browser tests** and **70 frontend tests in 15 files**, with lint, typecheck and build
+passing ([headless report](docs/headless-report.md)).
 
 The backend suites **reset** the test database and Redis: point `.env.test` at disposable instances. The browser suite
 needs Playwright's Chromium (`pnpm exec playwright install chromium`).
