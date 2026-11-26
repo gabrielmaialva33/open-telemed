@@ -68,6 +68,8 @@ namespace IPermission {
   }
 
   export enum Actions {
+    HEADLESS_DOCTOR = 'headless_doctor',
+    HEADLESS_PATIENT = 'headless_patient',
     ATTEND = 'attend',
     CANCEL = 'cancel',
     LINK = 'link',

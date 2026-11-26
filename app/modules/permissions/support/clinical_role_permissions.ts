@@ -15,6 +15,8 @@ export function clinicalRolePermissions(
       'consultations.attend.own',
     ],
     integrator: [
+      'consultations.headless_doctor',
+      'consultations.headless_patient',
       'consultations.update',
       'consultations.link',
       'professionals.read',

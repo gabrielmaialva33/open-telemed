@@ -2,7 +2,17 @@ import { clinicalRolePermissions } from '#modules/permissions/support/clinical_r
 import { BaseSchema } from '@adonisjs/lucid/schema'
 
 const defaultPermissionActions: Record<string, readonly string[]> = {
-  consultations: ['create', 'read', 'cancel', 'audit', 'list', 'update', 'link'],
+  consultations: [
+    'headless_doctor',
+    'headless_patient',
+    'create',
+    'read',
+    'cancel',
+    'audit',
+    'list',
+    'update',
+    'link',
+  ],
   professionals: ['create', 'read', 'update'],
   consent_texts: ['create', 'read'],
   tenant_branding: ['update'],

@@ -8,6 +8,8 @@ export const DEFAULT_PERMISSION_ACTIONS: Partial<
   Record<IPermission.Resources, IPermission.Actions[]>
 > = {
   consultations: [
+    IPermission.Actions.HEADLESS_DOCTOR,
+    IPermission.Actions.HEADLESS_PATIENT,
     IPermission.Actions.UPDATE,
     IPermission.Actions.LINK,
     IPermission.Actions.CREATE,
