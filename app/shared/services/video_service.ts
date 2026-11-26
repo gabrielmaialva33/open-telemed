@@ -3,7 +3,7 @@ import db from '@adonisjs/lucid/services/db'
 import { Exception } from '@adonisjs/core/exceptions'
 import Consultation from '#modules/consultations/models/consultation'
 import Consent from '#modules/consents/models/consent'
-import { AccessToken, RoomServiceClient, WebhookReceiver } from 'livekit-server-sdk'
+import { AccessToken, RoomServiceClient, ServerError, WebhookReceiver } from 'livekit-server-sdk'
 import env from '#start/env'
 
 export default class VideoService {
@@ -64,9 +64,26 @@ export default class VideoService {
     })
   }
 
-  async close(tenantId: number, consultationId: number) {
+  async close(
+    tenantId: number,
+    consultationId: number,
+    mode: 'cloud' | 'self_hosted' = env.get('LIVEKIT_REVOCATION_MODE', 'self_hosted')
+  ) {
     const name = this.roomName(tenantId, consultationId)
-    const rooms = await this.rooms.listRooms([name])
-    if (rooms.length) await this.rooms.deleteRoom(name)
+    if (mode === 'cloud') {
+      // Explicit cutoff also revokes absent participants. Never skip these calls based on
+      // room/participant listings: a disconnected client can still hold a refreshed token.
+      for (const role of ['doctor', 'patient']) {
+        await this.rooms.removeParticipant(name, `${role}-${consultationId}`, {
+          revokeTokenTs: BigInt(Math.floor(Date.now() / 1000) + 1),
+        })
+      }
+    }
+    try {
+      await this.rooms.deleteRoom(name)
+    } catch (error) {
+      // An explicit provider response confirming absence is idempotent success.
+      if (!(error instanceof ServerError) || error.code !== 'not_found') throw error
+    }
   }
 }

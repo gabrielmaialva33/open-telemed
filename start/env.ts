@@ -31,6 +31,7 @@ export default await Env.create(new URL('../', import.meta.url), {
   },
   LIVEKIT_API_KEY: Env.schema.string(),
   LIVEKIT_API_SECRET: Env.schema.string(),
+  LIVEKIT_REVOCATION_MODE: Env.schema.enum.optional(['cloud', 'self_hosted'] as const),
   LIVEKIT_NODE_IP: Env.schema.string.optional({ format: 'host' }),
   PLATFORM_HOSTS: Env.schema.string(),
   TRUST_PROXY: Env.schema.boolean.optional(),
