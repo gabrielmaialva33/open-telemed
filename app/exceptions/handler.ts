@@ -30,7 +30,7 @@ export default class HttpExceptionHandler extends ExceptionHandler {
    * response to the client
    */
   private isClinicalRequest(ctx: HttpContext) {
-    return /^(?:\/api\/v1)?\/(?:consultations|professionals)(?:\/|$)|^\/(?:professionals|clinic|patient)(?:\/|$)|^\/t\/[^/]+\/patient(?:\/|$)|^\/webhooks\/livekit$/.test(
+    return /^(?:\/api\/v1)?\/(?:consultations|professionals|headless)(?:\/|$)|^\/(?:professionals|clinic|patient)(?:\/|$)|^\/t\/[^/]+\/patient(?:\/|$)|^\/webhooks\/livekit$/.test(
       ctx.request.url()
     )
   }

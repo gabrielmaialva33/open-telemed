@@ -58,3 +58,5 @@ router
 
 import '#modules/consultations/routes'
 import '#modules/professionals/routes'
+
+import '#modules/headless/routes'
