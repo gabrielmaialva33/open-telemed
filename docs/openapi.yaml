@@ -3,31 +3,43 @@ info:
   title: Open Telemed API
   version: 0.1.0
   description: >-
-    Open Telemed API. Use a dedicated service user belonging to exactly one clinic, with an
-    opaque ServiceToken and explicit abilities. Login JWTs are not accepted by integration
-    routes. X-Tenant-Id requires membership; foreign resources return 404. Abilities:
-    consultations.create/read/update/link/cancel/audit and professionals.read. Attendance
-    remains exclusive to the assigned doctor in the authenticated panel.
+    Open Telemed API. Use a dedicated service user belonging to exactly one
+    clinic, with an opaque ServiceToken and explicit abilities. Login JWTs are
+    not accepted by integration routes. X-Tenant-Id requires membership; foreign
+    resources return 404. Abilities:
+    consultations.create/read/update/link/cancel/audit and professionals.read.
+    Clinical actions require the assigned doctor, in the panel or through the
+    headless API. Headless requests require a configured clinic connection and
+    consultations.headless_patient or consultations.headless_doctor abilities. A
+    service token alone never grants attendance. Each delegated action uses a
+    short-lived, single-use RS256 assertion scoped to its consultation, action
+    and mapped clinician. All headless responses use Cache-Control: no-store,
+    private and Referrer-Policy: no-referrer.
 
-    POST with an external_id already used in the clinic returns 200, created=false, the current
-    consultation and patient_url=null; payload differences are ignored and no link or event is
-    emitted. The first request returns 201, created=true and a secret link. Without external_id
-    each POST creates a consultation. A lost first response requires explicit link reissuance.
-    PATCH changes scheduled_at/professional_id only while scheduled, without renewing the link;
-    reissue expired links. ISO 8601 timestamps require an offset or Z. Reissuance invalidates
-    previous links and patient sessions, but does not revoke previously issued LiveKit tokens.
+    POST with an external_id already used in the clinic returns 200,
+    created=false, the current consultation and patient_url=null; payload
+    differences are ignored and no link or event is emitted. The first request
+    returns 201, created=true and a secret link. Without external_id each POST
+    creates a consultation. A lost first response requires explicit link
+    reissuance. PATCH changes scheduled_at/professional_id only while scheduled,
+    without renewing the link; reissue expired links. ISO 8601 timestamps
+    require an offset or Z. Reissuance invalidates previous links and patient
+    sessions, but does not revoke previously issued LiveKit tokens.
 
-    Exportable medical record/RAC data, not FHIR. Minimum retention is 20 years. Webhook POSTs
-    require an origin in WEBHOOK_ALLOWED_ORIGINS and HTTPS in production. ConsultationEvent
-    excludes patient names and documents. X-OpenTelemed-Timestamp is Unix seconds at each attempt;
-    X-OpenTelemed-Signature is sha256=HMAC-SHA256(secret, timestamp + '.' + exact UTF-8 body).
-    Receivers validate timestamp within 300 seconds, HMAC with timingSafeEqual, clinic mapping,
-    and unique event_id persisted atomically with effects. Timestamp alone cannot prevent replay
-    within the window. Retries reuse event_id/body and recalculate timestamp/signature. Delivery
-    can be duplicated or out of order; reconcile current state using GET. Return 2xx after durable
-    persistence. Six attempts, exponential backoff starting at 1 second, 10-second timeout,
-    no redirects. Exhausted retries require operator intervention. Drain the outbox before
-    rotating secrets; each delivery retains its encrypted secret.
+    Exportable medical record/RAC data, not FHIR. Minimum retention is 20 years.
+    Webhook POSTs require an origin in WEBHOOK_ALLOWED_ORIGINS and HTTPS in
+    production. ConsultationEvent excludes patient names and documents.
+    X-OpenTelemed-Timestamp is Unix seconds at each attempt;
+    X-OpenTelemed-Signature is sha256=HMAC-SHA256(secret, timestamp + '.' +
+    exact UTF-8 body). Receivers validate timestamp within 300 seconds, HMAC
+    with timingSafeEqual, clinic mapping, and unique event_id persisted
+    atomically with effects. Timestamp alone cannot prevent replay within the
+    window. Retries reuse event_id/body and recalculate timestamp/signature.
+    Delivery can be duplicated or out of order; reconcile current state using
+    GET. Return 2xx after durable persistence. Six attempts, exponential backoff
+    starting at 1 second, 10-second timeout, no redirects. Exhausted retries
+    require operator intervention. Drain the outbox before rotating secrets;
+    each delivery retains its encrypted secret.
   contact:
     name: API Support
     email: support@example.com
@@ -35,7 +47,7 @@ info:
     name: AGPL-3.0-only
     url: https://www.gnu.org/licenses/agpl-3.0.html
 servers:
-  - url: http://127.0.0.1:3333
+  - url: http://localhost:3333
     description: Local development server
   - url: https://api.yourdomain.com
     description: Production server
@@ -52,6 +64,14 @@ components:
       type: http
       scheme: bearer
       bearerFormat: Opaque AdonisJS API token
+    XPatientSession:
+      type: apiKey
+      in: header
+      name: X-Patient-Session
+      description: Opaque session returned by headless exchange. Bound to a single
+        consultation and accepted only together with the configured clinic
+        ServiceToken. Keep in clinic backend storage; never expose the
+        ServiceToken to browsers.
   schemas:
     User:
       type: object
@@ -142,9 +162,8 @@ components:
           $ref: '#/components/schemas/AuthTokens'
         email_verification_sent:
           type: boolean
-          description:
-            Present on sign-up responses; false means the account was created but email delivery
-            failed.
+          description: Present on sign-up responses; false means the account was created
+            but email delivery failed.
     AuthTokens:
       type: object
       required:
@@ -157,7 +176,8 @@ components:
           example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
         refresh_token:
           type: string
-          description: Opaque one-time refresh credential rotated after every successful refresh.
+          description: Opaque one-time refresh credential rotated after every successful
+            refresh.
           example: D4m6j6pTW1u3Jf_Z0Q4K7rJch7Jv8k9xQ4Q6xk2MsGv...
     RefreshTokenRequest:
       type: object
@@ -167,7 +187,8 @@ components:
         refresh_token:
           type: string
           minLength: 32
-          description: Opaque refresh token returned by sign-in, sign-up, tenant switch, or refresh.
+          description: Opaque refresh token returned by sign-in, sign-up, tenant switch,
+            or refresh.
     PasswordResetRequest:
       type: object
       required:
@@ -376,6 +397,11 @@ components:
         - scheduled_at
         - professional
         - consent
+        - revision
+        - record_schema_version
+        - professional_snapshot
+        - outcome_author
+        - video_closure
       properties:
         id:
           type: integer
@@ -456,6 +482,9 @@ components:
             rqe:
               type: string
               nullable: true
+          description: Captured professional summary after admission/no-show; live
+            assigned-professional summary beforehand. A null
+            professional_snapshot means identity has not yet been captured.
         consent:
           type: object
           properties:
@@ -468,6 +497,160 @@ components:
               format: date-time
               nullable: true
           nullable: true
+        revision:
+          type: integer
+          minimum: 0
+          description: Monotonic per-consultation event revision for reconciliation.
+        record_schema_version:
+          type: integer
+          enum:
+            - 1
+        professional_snapshot:
+          type: object
+          required:
+            - professional_id
+            - user_id
+            - name
+            - crm
+            - crm_uf
+            - rqe
+            - captured_at
+            - capture_reason
+          properties:
+            professional_id:
+              type: integer
+            user_id:
+              type: integer
+            name:
+              type: string
+            crm:
+              type: string
+            crm_uf:
+              type: string
+            rqe:
+              type: string
+              nullable: true
+            captured_at:
+              type: string
+              format: date-time
+            capture_reason:
+              type: string
+              enum:
+                - admission
+                - no_show
+          description: Immutable identity captured transactionally at admission, or at an
+            explicit no-show decision when admission never occurred. Later
+            profile changes do not rewrite it.
+          nullable: true
+        outcome_author:
+          type: object
+          required:
+            - kind
+            - user_id
+            - external_subject
+            - consultation_id
+            - attributed_at
+            - professional
+          properties:
+            kind:
+              type: string
+              enum:
+                - doctor
+                - patient
+                - system
+            user_id:
+              type: integer
+              nullable: true
+            external_subject:
+              type: string
+              nullable: true
+            consultation_id:
+              type: integer
+            attributed_at:
+              type: string
+              format: date-time
+            professional:
+              type: object
+              required:
+                - professional_id
+                - user_id
+                - name
+                - crm
+                - crm_uf
+                - rqe
+                - captured_at
+                - capture_reason
+              properties:
+                professional_id:
+                  type: integer
+                user_id:
+                  type: integer
+                name:
+                  type: string
+                crm:
+                  type: string
+                crm_uf:
+                  type: string
+                rqe:
+                  type: string
+                  nullable: true
+                captured_at:
+                  type: string
+                  format: date-time
+                capture_reason:
+                  type: string
+                  enum:
+                    - admission
+                    - no_show
+              description: Immutable identity captured transactionally at admission, or at an
+                explicit no-show decision when admission never occurred. Later
+                profile changes do not rewrite it.
+              nullable: true
+          description: Immutable decision attribution, not a signed clinical note,
+            prescription or digital signature. Doctor authors carry the captured
+            professional identity. Patient refusal and system/administrative
+            closure carry professional=null. user_id identifies the initiating
+            user when present; it alone does not mean clinical authorship.
+            Delegated service-account provenance is recorded separately in the
+            audit trail.
+          nullable: true
+        video_closure:
+          type: object
+          nullable: true
+          description: Physical video-room closure status, separate from the clinical
+            outcome. Null until closure is scheduled. Consumers can reconcile
+            closure using GET. In self_hosted mode, completed means the closure
+            operations succeeded; it does not guarantee revocation of previously
+            issued tokens, which may reconnect until expiry. Check
+            tokens_revoked independently.
+          required:
+            - status
+            - mode
+            - tokens_revoked
+            - attempts
+            - completed_at
+          properties:
+            status:
+              type: string
+              enum:
+                - pending
+                - completed
+            mode:
+              type: string
+              enum:
+                - cloud
+                - self_hosted
+            tokens_revoked:
+              type: boolean
+              description: Whether token revocation is recorded as completed; room closure
+                alone does not imply revocation.
+            attempts:
+              type: integer
+              minimum: 0
+            completed_at:
+              type: string
+              format: date-time
+              nullable: true
     ConsultationEvent:
       type: object
       required:
@@ -490,6 +673,7 @@ components:
           enum:
             - consultation.status_changed
             - consultation.updated
+            - consultation.interrupted
         occurred_at:
           type: string
           format: date-time
@@ -508,6 +692,9 @@ components:
             - admitted_at
             - started_at
             - ended_at
+            - revision
+            - record_schema_version
+            - outcome_author
           properties:
             id:
               type: integer
@@ -564,6 +751,338 @@ components:
                   type: string
                 crm_uf:
                   type: string
+              description: CRM/UF from the immutable snapshot when present, otherwise from the
+                assigned professional profile.
+            revision:
+              type: integer
+              minimum: 1
+            record_schema_version:
+              type: integer
+              enum:
+                - 1
+            outcome_author:
+              type: object
+              required:
+                - kind
+                - user_id
+                - attributed_at
+              properties:
+                kind:
+                  type: string
+                  enum:
+                    - doctor
+                    - patient
+                    - system
+                user_id:
+                  type: integer
+                  nullable: true
+                attributed_at:
+                  type: string
+                  format: date-time
+              nullable: true
+      description: Durable event with a monotonic per-consultation revision. A room
+        interruption emits consultation.interrupted while preserving
+        in_progress, outcome=null and existing authorship; the physician must
+        decide the medical outcome explicitly. Deduplicate event_id, ignore
+        older revisions and reconcile gaps using GET. No patient name/document
+        or full professional identity is included.
+    ProfessionalSnapshot:
+      type: object
+      required:
+        - professional_id
+        - user_id
+        - name
+        - crm
+        - crm_uf
+        - rqe
+        - captured_at
+        - capture_reason
+      properties:
+        professional_id:
+          type: integer
+        user_id:
+          type: integer
+        name:
+          type: string
+        crm:
+          type: string
+        crm_uf:
+          type: string
+        rqe:
+          type: string
+          nullable: true
+        captured_at:
+          type: string
+          format: date-time
+        capture_reason:
+          type: string
+          enum:
+            - admission
+            - no_show
+      description: Immutable identity captured transactionally at admission, or at an
+        explicit no-show decision when admission never occurred. Later profile
+        changes do not rewrite it.
+    OutcomeAuthor:
+      type: object
+      required:
+        - kind
+        - user_id
+        - external_subject
+        - consultation_id
+        - attributed_at
+        - professional
+      properties:
+        kind:
+          type: string
+          enum:
+            - doctor
+            - patient
+            - system
+        user_id:
+          type: integer
+          nullable: true
+        external_subject:
+          type: string
+          nullable: true
+        consultation_id:
+          type: integer
+        attributed_at:
+          type: string
+          format: date-time
+        professional:
+          type: object
+          required:
+            - professional_id
+            - user_id
+            - name
+            - crm
+            - crm_uf
+            - rqe
+            - captured_at
+            - capture_reason
+          properties:
+            professional_id:
+              type: integer
+            user_id:
+              type: integer
+            name:
+              type: string
+            crm:
+              type: string
+            crm_uf:
+              type: string
+            rqe:
+              type: string
+              nullable: true
+            captured_at:
+              type: string
+              format: date-time
+            capture_reason:
+              type: string
+              enum:
+                - admission
+                - no_show
+          description: Immutable identity captured transactionally at admission, or at an
+            explicit no-show decision when admission never occurred. Later
+            profile changes do not rewrite it.
+          nullable: true
+      description: Immutable decision attribution, not a signed clinical note,
+        prescription or digital signature. Doctor authors carry the captured
+        professional identity. Patient refusal and system/administrative closure
+        carry professional=null. user_id identifies the initiating user when
+        present; it alone does not mean clinical authorship. Delegated
+        service-account provenance is recorded separately in the audit trail.
+    HeadlessDoctorAssertion:
+      type: object
+      required:
+        - assertion
+      properties:
+        assertion:
+          type: string
+          maxLength: 8192
+      description: 'Compact RS256 JWT signed by the clinic backend and verified only
+        with the configured public key and issuer. Claims: iss=configured
+        issuer; aud=telemed:doctor-action; sub=pre-mapped clinician subject
+        (1..128 characters); jti=UUID; iat and exp=integer Unix seconds;
+        consultation_id=positive integer matching the URL;
+        action=state|admit|video-token|end matching the URL. exp must exceed
+        iat, lifetime is at most 60 seconds, iat may be at most 5 seconds ahead
+        and 60 seconds old, and exp must remain valid when the action executes.
+        end also requires a signed outcome=completed|referred_in_person|no_show.
+        A successful action consumes jti atomically; retries after success need
+        a fresh assertion. A service account, manager without mapped clinician
+        identity, another doctor or another clinic cannot attend.'
+    HeadlessVideoToken:
+      type: object
+      required:
+        - token
+        - url
+      properties:
+        token:
+          type: string
+        url:
+          type: string
+          format: uri
+      description: LiveKit token scoped to this consultation and participant role,
+        valid for 60 seconds. Requires admission and consent. Previously issued
+        tokens may reconnect until expiry; room closure is retried and late
+        joins to terminal consultations are removed. Never expose service
+        credentials to the browser.
+    HeadlessPatientState:
+      type: object
+      required:
+        - clinic
+        - consultation
+        - term
+      properties:
+        clinic:
+          type: object
+          required:
+            - name
+            - slug
+            - logo_url
+            - primary_color
+            - accent_color
+            - legal_name
+            - cnpj
+            - crm_pj
+            - crm_pj_uf
+            - technical_director_name
+            - technical_director_crm
+            - technical_director_uf
+          properties:
+            name:
+              type: string
+            slug:
+              type: string
+            logo_url:
+              type: string
+              nullable: true
+            primary_color:
+              type: string
+              nullable: true
+            accent_color:
+              type: string
+              nullable: true
+            legal_name:
+              type: string
+              nullable: true
+            cnpj:
+              type: string
+              nullable: true
+            crm_pj:
+              type: string
+              nullable: true
+            crm_pj_uf:
+              type: string
+              nullable: true
+            technical_director_name:
+              type: string
+              nullable: true
+            technical_director_crm:
+              type: string
+              nullable: true
+            technical_director_uf:
+              type: string
+              nullable: true
+        consultation:
+          type: object
+          required:
+            - id
+            - status
+            - outcome
+            - patient_name
+            - scheduled_at
+            - consented
+            - admitted
+            - recording_allowed
+          properties:
+            id:
+              type: integer
+            status:
+              type: string
+              enum:
+                - scheduled
+                - waiting
+                - in_progress
+                - ended
+                - cancelled
+            outcome:
+              type: string
+              enum:
+                - completed
+                - referred_in_person
+                - patient_declined
+                - no_show
+                - null
+              nullable: true
+            patient_name:
+              type: string
+              description: First name only.
+            scheduled_at:
+              type: string
+              format: date-time
+            consented:
+              type: boolean
+            admitted:
+              type: boolean
+            recording_allowed:
+              type: boolean
+        term:
+          type: object
+          required:
+            - version
+            - hash
+            - body
+          properties:
+            version:
+              type: integer
+            hash:
+              type: string
+              pattern: ^[a-f0-9]{64}$
+            body:
+              type: string
+    HeadlessPatientConsent:
+      type: object
+      required:
+        - accepted
+        - version
+        - text_hash
+        - client_ip
+        - client_user_agent
+      properties:
+        accepted:
+          type: boolean
+          enum:
+            - true
+        version:
+          type: integer
+          minimum: 1
+        text_hash:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        recording_allowed:
+          type: boolean
+        representative_name:
+          type: string
+          minLength: 2
+          maxLength: 160
+        representative_document:
+          type: string
+          minLength: 2
+          maxLength: 32
+        client_ip:
+          type: string
+          description: Original patient IPv4/IPv6 address collected by the trusted clinic
+            backend.
+        client_user_agent:
+          type: string
+          minLength: 1
+          maxLength: 2048
+      description: Requires the exact version/hash displayed for this patient session.
+        Representative name and document must be supplied together. Patient
+        IP/user agent evidence is supplied by the trusted clinic backend.
+        Recording preference does not enable recording.
   parameters:
     pathId:
       name: id
@@ -619,7 +1138,16 @@ components:
       schema:
         type: integer
         minimum: 1
-      description: Optional active workspace override. Membership and active status are always validated.
+      description: Optional active workspace override. Membership and active status
+        are always validated.
+    headlessConsultationId:
+      name: consultation_id
+      in: query
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+      description: Consultation bound to X-Patient-Session.
   responses:
     UnauthorizedError:
       description: Authentication required
@@ -673,6 +1201,9 @@ tags:
     description: Permission management operations (admin only)
   - name: Consultas
     description: Tenant-scoped integration API
+  - name: Headless
+    description: Clinic-backend patient flow and signed, single-use delegated
+      clinician actions.
 paths:
   /version:
     get:
@@ -762,8 +1293,8 @@ paths:
     post:
       operationId: signIn
       summary: User login
-      description: Authenticate a user and receive a short-lived access JWT plus an opaque rotating
-        refresh token.
+      description: Authenticate a user and receive a short-lived access JWT plus an
+        opaque rotating refresh token.
       tags:
         - Authentication
       security: []
@@ -808,9 +1339,8 @@ paths:
     post:
       operationId: requestPasswordReset
       summary: Request a password reset link
-      description:
-        Returns the same accepted response whether or not the email exists. Any issued token is
-        opaque, single-use, and stored only as an HMAC.
+      description: Returns the same accepted response whether or not the email exists.
+        Any issued token is opaque, single-use, and stored only as an HMAC.
       tags:
         - Authentication
       security: []
@@ -844,9 +1374,8 @@ paths:
     post:
       operationId: resetPassword
       summary: Reset an account password
-      description:
-        Consumes a valid reset token, changes the password, invalidates other reset links, and
-        revokes active API refresh tokens.
+      description: Consumes a valid reset token, changes the password, invalidates
+        other reset links, and revokes active API refresh tokens.
       tags:
         - Authentication
       security: []
@@ -869,7 +1398,8 @@ paths:
     post:
       operationId: refreshSession
       summary: Rotate a refresh token
-      description: Atomically revokes the submitted opaque refresh token and returns a new access/refresh pair.
+      description: Atomically revokes the submitted opaque refresh token and returns a
+        new access/refresh pair.
       tags:
         - Authentication
       security: []
@@ -931,8 +1461,9 @@ paths:
     delete:
       operationId: deleteOwnAccount
       summary: Delete the authenticated account
-      description: Requires the current password and the literal confirmation DELETE. The user is
-        anonymized and active API credentials are revoked while historical references remain intact.
+      description: Requires the current password and the literal confirmation DELETE.
+        The user is anonymized and active API credentials are revoked while
+        historical references remain intact.
       tags:
         - Profile
       requestBody:
@@ -1008,9 +1539,10 @@ paths:
     post:
       operationId: signUp
       summary: User registration
-      description: Creates a user, assigns the default role, optionally creates a personal workspace
-        according to `REGISTRATION_WORKSPACE_MODE`, and returns tenant-scoped API tokens. Email
-        delivery failure does not roll back the account.
+      description: Creates a user, assigns the default role, optionally creates a
+        personal workspace according to `REGISTRATION_WORKSPACE_MODE`, and
+        returns tenant-scoped API tokens. Email delivery failure does not roll
+        back the account.
       tags:
         - Authentication
       security: []
@@ -1093,9 +1625,9 @@ paths:
     post:
       operationId: createTenant
       summary: Create a workspace
-      description:
-        Creates an active workspace, adds the authenticated user as owner, and returns a token
-        pair carrying the new tenant id. Requires `tenants.create`.
+      description: Creates an active workspace, adds the authenticated user as owner,
+        and returns a token pair carrying the new tenant id. Requires
+        `tenants.create`.
       tags:
         - Tenants
       requestBody:
@@ -1169,8 +1701,8 @@ paths:
     post:
       operationId: switchTenant
       summary: Switch the active API tenant
-      description: Validates active membership and issues a fresh access/refresh pair carrying the
-        selected tenant.
+      description: Validates active membership and issues a fresh access/refresh pair
+        carrying the selected tenant.
       tags:
         - Tenants
       requestBody:
@@ -1668,7 +2200,8 @@ paths:
     get:
       operationId: listFiles
       summary: List files in the active workspace
-      description: Returns a paginated tenant-scoped file list. Requires `files.list` and an active workspace.
+      description: Returns a paginated tenant-scoped file list. Requires `files.list`
+        and an active workspace.
       tags:
         - Files
       parameters:
@@ -1776,9 +2309,9 @@ paths:
     delete:
       operationId: deleteFile
       summary: Delete a workspace file
-      description:
-        Deletes a file from storage and the database. `files.delete` may delete any workspace
-        file; `files.delete.own` is restricted to the uploader.
+      description: Deletes a file from storage and the database. `files.delete` may
+        delete any workspace file; `files.delete.own` is restricted to the
+        uploader.
       tags:
         - Files
       parameters:
@@ -1836,15 +2369,21 @@ paths:
                     type: string
                     format: uri
                     nullable: true
+                    description: For a configured headless clinic, uses the provisioned clinic
+                      patient URL and a secret fragment. The clinic owns
+                      recipients, delivery and message template. Null on an
+                      idempotent creation retry.
                   doctor_url:
                     type: string
                     format: uri
+                    nullable: true
+                    description: Null for a configured headless clinic; the clinic renders its own
+                      doctor route without a second platform login.
                   created:
                     type: boolean
         '201':
-          description:
-            Consultation created. The link secret appears only in the fragment; store it securely
-            and send it directly to the patient.
+          description: Consultation created. The link secret appears only in the fragment;
+            store it securely and send it directly to the patient.
           content:
             application/json:
               schema:
@@ -1861,9 +2400,16 @@ paths:
                     type: string
                     format: uri
                     nullable: true
+                    description: For a configured headless clinic, uses the provisioned clinic
+                      patient URL and a secret fragment. The clinic owns
+                      recipients, delivery and message template. Null on an
+                      idempotent creation retry.
                   doctor_url:
                     type: string
                     format: uri
+                    nullable: true
+                    description: Null for a configured headless clinic; the clinic renders its own
+                      doctor route without a second platform login.
                   created:
                     type: boolean
         '401':
@@ -2007,7 +2553,8 @@ paths:
             minimum: 1
       responses:
         '200':
-          description: Consultation cancelled; new tokens blocked and room closure requested.
+          description: Consultation cancelled; new tokens blocked and room closure
+            requested.
           content:
             application/json:
               schema:
@@ -2112,7 +2659,8 @@ paths:
       operationId: issuePatientLink
       tags:
         - Consultas
-      summary: Reissue link and invalidate previous links/sessions; requires consultations.link
+      summary: Reissue link and invalidate previous links/sessions; requires
+        consultations.link
       security:
         - ServiceToken: []
       parameters:
@@ -2254,3 +2802,517 @@ paths:
           description: Invalid input
         '429':
           description: 'Rate limit: at most 100 requests/minute per service user'
+  /api/v1/headless/patient/session:
+    post:
+      operationId: headlessPatientSession
+      tags:
+        - Headless
+      summary: Exchange a patient link for a clinic-scoped session
+      description: Requires the configured service user, active clinic membership and
+        consultations.headless_patient in both token abilities and permissions.
+        The clinic backend calls this API; patients do not need an account. All
+        responses disable caching.
+      security:
+        - ServiceToken: []
+      parameters:
+        - $ref: '#/components/parameters/tenantHeader'
+      responses:
+        '200':
+          description: Successful action; sensitive data must not be cached.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum:
+                  - no-store, private
+            Referrer-Policy:
+              schema:
+                type: string
+                enum:
+                  - no-referrer
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/HeadlessPatientState'
+                  - type: object
+                    required:
+                      - session_secret
+                    properties:
+                      session_secret:
+                        type: string
+                        minLength: 32
+                        maxLength: 128
+                        description:
+                          Opaque secret, valid no later than three hours or link expiry. A
+                          new exchange replaces the previous session.
+        '401':
+          description: Missing/invalid service or patient credential,
+            invalid/expired/replayed doctor assertion.
+        '403':
+          description: Missing membership/ability, inactive connection, mismatched service
+            user or unauthorized clinician/action scope.
+        '404':
+          description: Consultation/link not found in this clinic.
+        '409':
+          description: Consultation state or consent does not permit this action.
+        '422':
+          description: Invalid request payload or query.
+        '429':
+          description: Rate limit exceeded.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - secret
+              properties:
+                secret:
+                  type: string
+                  minLength: 32
+                  maxLength: 128
+                  description: Secret fragment from the patient link; remove it from browser
+                    history immediately.
+  /api/v1/headless/patient/state:
+    post:
+      operationId: headlessPatientState
+      tags:
+        - Headless
+      summary: Read patient waiting-room state and pinned consent text
+      description: Requires the configured service user, active clinic membership and
+        consultations.headless_patient in both token abilities and permissions.
+        The clinic backend calls this API; patients do not need an account. All
+        responses disable caching.
+      security:
+        - ServiceToken: []
+          XPatientSession: []
+      parameters:
+        - $ref: '#/components/parameters/tenantHeader'
+        - $ref: '#/components/parameters/headlessConsultationId'
+      responses:
+        '200':
+          description: Successful action; sensitive data must not be cached.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum:
+                  - no-store, private
+            Referrer-Policy:
+              schema:
+                type: string
+                enum:
+                  - no-referrer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeadlessPatientState'
+        '401':
+          description: Missing/invalid service or patient credential,
+            invalid/expired/replayed doctor assertion.
+        '403':
+          description: Missing membership/ability, inactive connection, mismatched service
+            user or unauthorized clinician/action scope.
+        '404':
+          description: Consultation/link not found in this clinic.
+        '409':
+          description: Consultation state or consent does not permit this action.
+        '422':
+          description: Invalid request payload or query.
+        '429':
+          description: Rate limit exceeded.
+  /api/v1/headless/patient/consent:
+    post:
+      operationId: headlessPatientConsent
+      tags:
+        - Headless
+      summary: Accept displayed consent with patient evidence
+      description: Requires the configured service user, active clinic membership and
+        consultations.headless_patient in both token abilities and permissions.
+        The clinic backend calls this API; patients do not need an account. All
+        responses disable caching.
+      security:
+        - ServiceToken: []
+          XPatientSession: []
+      parameters:
+        - $ref: '#/components/parameters/tenantHeader'
+        - $ref: '#/components/parameters/headlessConsultationId'
+      responses:
+        '200':
+          description: Successful action; sensitive data must not be cached.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum:
+                  - no-store, private
+            Referrer-Policy:
+              schema:
+                type: string
+                enum:
+                  - no-referrer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeadlessPatientState'
+        '401':
+          description: Missing/invalid service or patient credential,
+            invalid/expired/replayed doctor assertion.
+        '403':
+          description: Missing membership/ability, inactive connection, mismatched service
+            user or unauthorized clinician/action scope.
+        '404':
+          description: Consultation/link not found in this clinic.
+        '409':
+          description: Consultation state or consent does not permit this action.
+        '422':
+          description: Invalid request payload or query.
+        '429':
+          description: Rate limit exceeded.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeadlessPatientConsent'
+  /api/v1/headless/patient/video-token:
+    post:
+      operationId: headlessPatientVideoToken
+      tags:
+        - Headless
+      summary: Issue a patient LiveKit token after admission
+      description: Requires the configured service user, active clinic membership and
+        consultations.headless_patient in both token abilities and permissions.
+        The clinic backend calls this API; patients do not need an account. All
+        responses disable caching.
+      security:
+        - ServiceToken: []
+          XPatientSession: []
+      parameters:
+        - $ref: '#/components/parameters/tenantHeader'
+        - $ref: '#/components/parameters/headlessConsultationId'
+      responses:
+        '200':
+          description: Successful action; sensitive data must not be cached.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum:
+                  - no-store, private
+            Referrer-Policy:
+              schema:
+                type: string
+                enum:
+                  - no-referrer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeadlessVideoToken'
+        '401':
+          description: Missing/invalid service or patient credential,
+            invalid/expired/replayed doctor assertion.
+        '403':
+          description: Missing membership/ability, inactive connection, mismatched service
+            user or unauthorized clinician/action scope.
+        '404':
+          description: Consultation/link not found in this clinic.
+        '409':
+          description: Consultation state or consent does not permit this action.
+        '422':
+          description: Invalid request payload or query.
+        '429':
+          description: Rate limit exceeded.
+  /api/v1/headless/patient/decline:
+    post:
+      operationId: headlessPatientDecline
+      tags:
+        - Headless
+      summary: Record patient refusal and end the consultation
+      description: Requires the configured service user, active clinic membership and
+        consultations.headless_patient in both token abilities and permissions.
+        The clinic backend calls this API; patients do not need an account. All
+        responses disable caching.
+      security:
+        - ServiceToken: []
+          XPatientSession: []
+      parameters:
+        - $ref: '#/components/parameters/tenantHeader'
+        - $ref: '#/components/parameters/headlessConsultationId'
+      responses:
+        '200':
+          description: Successful action; sensitive data must not be cached.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum:
+                  - no-store, private
+            Referrer-Policy:
+              schema:
+                type: string
+                enum:
+                  - no-referrer
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - outcome
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - ended
+                  outcome:
+                    type: string
+                    enum:
+                      - patient_declined
+        '401':
+          description: Missing/invalid service or patient credential,
+            invalid/expired/replayed doctor assertion.
+        '403':
+          description: Missing membership/ability, inactive connection, mismatched service
+            user or unauthorized clinician/action scope.
+        '404':
+          description: Consultation/link not found in this clinic.
+        '409':
+          description: Consultation state or consent does not permit this action.
+        '422':
+          description: Invalid request payload or query.
+        '429':
+          description: Rate limit exceeded.
+  /api/v1/headless/doctor/{id}/state:
+    post:
+      operationId: headlessDoctorState
+      tags:
+        - Headless
+      summary: Read the assigned doctor consultation record
+      description: Requires consultations.headless_doctor in token abilities and
+        permissions, configured service identity, and an assertion with
+        action=state. Even state reads need a new one-use assertion. Service
+        identity remains separate from the mapped clinician and is recorded in
+        the audit trail.
+      security:
+        - ServiceToken: []
+      parameters:
+        - $ref: '#/components/parameters/tenantHeader'
+        - $ref: '#/components/parameters/pathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeadlessDoctorAssertion'
+      responses:
+        '200':
+          description: Successful action; sensitive data must not be cached.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum:
+                  - no-store, private
+            Referrer-Policy:
+              schema:
+                type: string
+                enum:
+                  - no-referrer
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - data
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ConsultationRecord'
+        '401':
+          description: Missing/invalid service or patient credential,
+            invalid/expired/replayed doctor assertion.
+        '403':
+          description: Missing membership/ability, inactive connection, mismatched service
+            user or unauthorized clinician/action scope.
+        '404':
+          description: Consultation/link not found in this clinic.
+        '409':
+          description: Consultation state or consent does not permit this action.
+        '422':
+          description: Invalid request payload or query.
+        '429':
+          description: Rate limit exceeded.
+  /api/v1/headless/doctor/{id}/admit:
+    post:
+      operationId: headlessDoctorAdmit
+      tags:
+        - Headless
+      summary: Admit the consenting patient and capture clinician identity
+      description: Requires consultations.headless_doctor in token abilities and
+        permissions, configured service identity, and an assertion with
+        action=admit. Even state reads need a new one-use assertion. Service
+        identity remains separate from the mapped clinician and is recorded in
+        the audit trail.
+      security:
+        - ServiceToken: []
+      parameters:
+        - $ref: '#/components/parameters/tenantHeader'
+        - $ref: '#/components/parameters/pathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeadlessDoctorAssertion'
+      responses:
+        '200':
+          description: Successful action; sensitive data must not be cached.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum:
+                  - no-store, private
+            Referrer-Policy:
+              schema:
+                type: string
+                enum:
+                  - no-referrer
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - data
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ConsultationRecord'
+        '401':
+          description: Missing/invalid service or patient credential,
+            invalid/expired/replayed doctor assertion.
+        '403':
+          description: Missing membership/ability, inactive connection, mismatched service
+            user or unauthorized clinician/action scope.
+        '404':
+          description: Consultation/link not found in this clinic.
+        '409':
+          description: Consultation state or consent does not permit this action.
+        '422':
+          description: Invalid request payload or query.
+        '429':
+          description: Rate limit exceeded.
+  /api/v1/headless/doctor/{id}/video-token:
+    post:
+      operationId: headlessDoctorVideoToken
+      tags:
+        - Headless
+      summary: Issue the assigned doctor LiveKit token
+      description: Requires consultations.headless_doctor in token abilities and
+        permissions, configured service identity, and an assertion with
+        action=video-token. Even state reads need a new one-use assertion.
+        Service identity remains separate from the mapped clinician and is
+        recorded in the audit trail.
+      security:
+        - ServiceToken: []
+      parameters:
+        - $ref: '#/components/parameters/tenantHeader'
+        - $ref: '#/components/parameters/pathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeadlessDoctorAssertion'
+      responses:
+        '200':
+          description: Successful action; sensitive data must not be cached.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum:
+                  - no-store, private
+            Referrer-Policy:
+              schema:
+                type: string
+                enum:
+                  - no-referrer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeadlessVideoToken'
+        '401':
+          description: Missing/invalid service or patient credential,
+            invalid/expired/replayed doctor assertion.
+        '403':
+          description: Missing membership/ability, inactive connection, mismatched service
+            user or unauthorized clinician/action scope.
+        '404':
+          description: Consultation/link not found in this clinic.
+        '409':
+          description: Consultation state or consent does not permit this action.
+        '422':
+          description: Invalid request payload or query.
+        '429':
+          description: Rate limit exceeded.
+  /api/v1/headless/doctor/{id}/end:
+    post:
+      operationId: headlessDoctorEnd
+      tags:
+        - Headless
+      summary: End the consultation with a clinician-authored outcome
+      description: Requires consultations.headless_doctor in token abilities and
+        permissions, configured service identity, and an assertion with
+        action=end. Even state reads need a new one-use assertion. Service
+        identity remains separate from the mapped clinician and is recorded in
+        the audit trail.
+      security:
+        - ServiceToken: []
+      parameters:
+        - $ref: '#/components/parameters/tenantHeader'
+        - $ref: '#/components/parameters/pathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeadlessDoctorAssertion'
+      responses:
+        '200':
+          description: Successful action; sensitive data must not be cached.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum:
+                  - no-store, private
+            Referrer-Policy:
+              schema:
+                type: string
+                enum:
+                  - no-referrer
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - data
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ConsultationRecord'
+        '401':
+          description: Missing/invalid service or patient credential,
+            invalid/expired/replayed doctor assertion.
+        '403':
+          description: Missing membership/ability, inactive connection, mismatched service
+            user or unauthorized clinician/action scope.
+        '404':
+          description: Consultation/link not found in this clinic.
+        '409':
+          description: Consultation state or consent does not permit this action.
+        '422':
+          description: Invalid request payload or query.
+        '429':
+          description: Rate limit exceeded.
