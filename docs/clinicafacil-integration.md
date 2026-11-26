@@ -1,125 +1,134 @@
 **English** · [Português](clinicafacil-integration.pt.md)
 
-# Clínica Fácil integration
+# Clínica Fácil headless integration
 
-Status: open-telemed implementation and tests complete; Clínica Fácil was inspected read-only. The changes proposed for Clínica Fácil and SSO below are not implemented. See [OpenAPI](openapi.yaml), [review report](review-report.md) and [clinical requirements](brazil-telemedicine-rules.md).
+Implemented in the engine; the Clínica Fácil changes below are the next implementation ticket. Its repository was read-only throughout. This document supersedes the earlier second-login proposal. See [OpenAPI](openapi.yaml), [headless report](headless-report.md) and [clinical requirements](brazil-telemedicine-rules.md).
 
-## Identity and tenant boundary
+## Chosen architecture and alternatives
 
-One Clínica Fácil business maps to one open-telemed clinic. Use **one dedicated service user and opaque token per clinic**, with exactly one active clinic membership. This limits the impact of a leaked credential and makes attribution and rotation explicit. A shared platform-wide integrator would increase that impact and is not the proposed deployment.
+**Clínica Fácil renders both patient and doctor flows on its own domain, with a backend-for-frontend (BFF).** All engine calls come from that backend. The doctor stays in the authenticated agenda; the patient uses a secret link without an account. Clínica Fácil uses `@livekit/components-react` inside its own layouts with room-scoped tokens from the BFF. It owns titles, copy, legal clinic identity, loading/error screens and support links: no engine login, logo, attribution or navigation. The engine panel is for platform operations. Public patient exchange and panel attendance are refused for configured headless clinics.
 
-Send `Authorization: Bearer <service-token>` and the mapped `X-Tenant-Id`. Membership, active tenant, RBAC and token abilities are checked. Single-clinic membership is a provisioning requirement, not a new token-level tenant restriction: do not add other memberships to that user. Login JWTs do not authenticate the integration API.
+Rejected: an iframe/custom-host engine page duplicates the UI and session boundary; shared browser login/long-lived impersonation JWTs expand privileges. `custom_hosts` remains available for non-headless deployments, but is not the Clínica Fácil integration. Media infrastructure addresses may remain visible to developer tools; no claim is made that WebRTC hides its network destination. Product navigation and links remain Clínica Fácil's.
 
-Grant only `consultations.create`, `consultations.read`, `consultations.update`, `consultations.link`, `consultations.cancel`, `consultations.audit` and `professionals.read`. There is no integrator attendance privilege. Store tokens and webhook secrets encrypted on the server; never expose them to the browser, assistant or logs. On existing open-telemed installations run `pnpm ace permission:sync`; existing tokens need explicit reissuance to gain new abilities. Do not rerun seeders for provisioning.
+**Doctor authorization:** per-action signed assertions, not an engine login session. Keep one opaque service credential and one signing key pair per business/clinic; private keys and service tokens never enter the browser. The operator pins the issuer, RSA public key, service user, patient URL and explicit external-subject → professional mapping. Separate service and clinician accounts. Service membership must be exclusive to that clinic when configured.
 
-## HTTP contract
+## Provisioning and trust contract
 
-All paths below start with `/api/v1`; JSON bodies and responses. The OpenAPI contains full schemas.
+Operator commands in the engine (placeholder values only):
 
-| Method and path                           | Ability                | Successful result and constraints                                                                                                                                |
-| ----------------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /consultations`                     | `consultations.create` | 201 `{created:true, consultation, patient_url, doctor_url}` on creation; 200 `{created:false, consultation, patient_url:null, doctor_url}` on idempotent replay. |
-| `GET /consultations/:id`                  | `consultations.read`   | 200 `{data}` containing professional, consent version/hash, timestamps and retention date.                                                                       |
-| `PATCH /consultations/:id`                | `consultations.update` | 200 `{data}`; change `scheduled_at` and/or `professional_id` only while `scheduled`.                                                                             |
-| `POST /consultations/:id/patient-link`    | `consultations.link`   | 200 `{patient_url}`; explicitly revokes previous links and patient sessions. Terminal consultations return 409.                                                  |
-| `POST /consultations/:id/cancel`          | `consultations.cancel` | 200 `{data}` for scheduled/waiting; in-progress or terminal consultations return 409.                                                                            |
-| `GET /consultations/:id/audit`            | `consultations.audit`  | 200 `{data:[...]}`; append-only audit events.                                                                                                                    |
-| `GET /professionals?crm=123456&crm_uf=SP` | `professionals.read`   | 200 `{data:[...]}` with id/name/CRM/UF/RQE; filters optional, scoped to the selected clinic; no match returns an empty list.                                     |
+```sh
+pnpm ace permission:sync
+pnpm ace telemed:configure-headless --tenant-id=7 --service-user-id=20 --issuer=clinicafacil-unit-7 --public-key-file=clinic-public.pem --patient-url=https://clinic.example/teleconsulta
+pnpm ace telemed:map-doctor --tenant-id=7 --professional-id=42 --subject=doctor-314
+```
 
-Example create body (synthetic values):
+Provision doctors with verified name/CRM/UF/RQE using the operations panel. A mapping requires an active clinic member with the `doctor` role; global root and service accounts cannot be mapped. Clínica Fácil's `professionals.user_id` is optional and its council/registration fields are free text: do not infer identity from a name or parse unverified credentials automatically. Map its authenticated account and local professional explicitly. Changing issuer with existing mappings is rejected; remove/reverify mappings first. Same-issuer key rotation preserves mappings, immediately invalidating assertions signed with the previous key.
+
+The dedicated service role/token needs the existing create/read/update/link/cancel/audit and professional-read abilities, plus `consultations.headless_patient` and `consultations.headless_doctor`. Each route checks RBAC, token ability, tenant membership and the configured service user. Existing tokens require explicit reissuance for new abilities. No seed rerun is needed.
+
+Clínica Fácil must check active login, module entitlement, business membership, exact assigned professional, doctor capability and current appointment on **every** doctor request before signing. An owner/manager cannot select a doctor's subject. A compromised trusted signing backend can impersonate its mapped doctors; protect and audit this explicit federation trust boundary.
+
+## Doctor API — server to server
+
+All requests use `Authorization: Bearer <service-token>` and mapped `X-Tenant-Id`. POST JSON `{ "assertion": "<signed JWT>" }` to `/api/v1/headless/doctor/:id/{state,admit,video-token,end}`.
+
+Example signed payload; identifiers are synthetic:
 
 ```json
 {
-  "external_id": "appointment:1234",
-  "professional_id": 42,
-  "patient_name": "Example Patient",
-  "patient_location": "São Paulo/SP",
-  "scheduled_at": "2026-12-10T14:00:00-03:00"
+  "iss": "clinicafacil-unit-7",
+  "aud": "telemed:doctor-action",
+  "sub": "doctor-314",
+  "jti": "cc0e4a41-a276-445c-8698-afb043bb1ac0",
+  "iat": 1807000000,
+  "exp": 1807000060,
+  "consultation_id": 81,
+  "action": "end",
+  "outcome": "completed"
 }
 ```
 
-`patient_document` is optional. Use the actual attendee, not automatically the WhatsApp contact or paying customer. Patient location must be supplied explicitly. Timestamps require an ISO 8601 offset or `Z` and a valid calendar date.
+Sign with **RS256**, RSA ≥2048 bits. `exp-iat` must be positive and ≤60 seconds; expired assertions, old `iat`, `iat` more than five seconds in the future, wrong issuer/audience/algorithm/key, unmapped subject and action/consultation mismatch fail. `jti` is a UUID, consumed atomically with each successful action; retries after uncertain success use a fresh assertion and reconcile state. `outcome` is signed and required for `end`, not taken from an unsigned body field. No key URL supplied by the caller is fetched.
 
-`external_id` is unique **within the clinic**. Concurrent retries are serialized and create one consultation, initial link and scheduled event. A replay must still contain a valid create body; differences are ignored, not applied. Without `external_id`, each POST creates a new consultation. If the first response is lost, GET/repeated POST cannot recover its secret: explicitly issue a replacement link. Persist the appointment-to-consultation mapping before delivery.
+The engine rechecks connection, clinician membership, exact assigned professional, direct `doctor` role and its attendance grant under the consultation lock. Root and managers without that clinical identity are refused. It does not grant an integrator generic `attend` permission. Audit records distinguish the clinician from the service user/connection that transported the request.
 
-Create and link responses use `Cache-Control: no-store`. A patient link carries its secret in the URL fragment. Treat the full URL as a credential, including in WhatsApp storage and error traces. Its initial expiry is the later of scheduled time + 1 day or issuance + 3 hours. PATCH preserves the link and never renews its expiry; explicitly reissue when needed. Reissuance revokes cookies/links, **not previously issued LiveKit JWTs**. Do not automatically reissue during a call.
+| Action        | Result                                                                                                                                                                                   |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `state`       | 200 `{data: ConsultationRecord}` from the authorized locked record.                                                                                                                      |
+| `admit`       | 200 `{data}`; requires waiting plus accepted consent, starts attendance and freezes doctor identity.                                                                                     |
+| `video-token` | 200 `{token,url}`; requires consent/admission/in-progress, role-only metadata, two participants, initial TTL 60 seconds.                                                                 |
+| `end`         | 200 `{data}`; signed outcome `completed`, `referred_in_person` or `no_show`; records immutable authorship and schedules video closure. Medical completion/referral requires in-progress. |
 
-Errors: 401 invalid/missing/expired authentication; 403 missing membership/permission/ability; 404 missing or foreign resource; 409 incompatible state; 422 invalid input; 429 rate limit (100 requests/minute per service user). Preserve structured errors, avoid logging patient fields, and retry transport/5xx/429 with bounded backoff; resolve 4xx semantically. Cancellation/end are state transitions, not idempotent success responses: reconcile via GET after uncertain delivery.
+Errors: 400 invalid tenant context/header; 401 invalid/expired credentials or assertion replay; 403 missing ability/membership or wrong clinical identity/scope; 404 missing/foreign resource; 409 incompatible state; 422 invalid payload; 429 rate limit. Retry transport/5xx/429 with bounded backoff; reconcile state after an uncertain mutation instead of treating a repeated transition as success.
 
-## Signed outbound webhook
+There is no engine session cookie or second login. The BFF forwards only the authorized UI result, never the assertion/service token. All headless responses are `no-store, private` with `no-referrer`. Authenticate the BFF's own browser routes and enforce CSRF there.
 
-Configure a clinic webhook URL and encrypted secret in open-telemed. Its origin must be approved by the operator in `WEBHOOK_ALLOWED_ORIGINS`; the empty list denies delivery. Production requires HTTPS, no URL credentials or fragments, and redirects are refused. Trust the approved origin and its DNS; this is an operator allowlist, not DNS pinning. Changing a clinic URL does not rewrite already queued deliveries.
+## Patient API — server to server
 
-```json
-{
-  "event_id": "b4ac396e-c9a8-47b4-bf18-83f8d50a1d9a",
-  "id": "b4ac396e-c9a8-47b4-bf18-83f8d50a1d9a",
-  "event": "consultation.status_changed",
-  "occurred_at": "2026-12-10T17:30:00.000Z",
-  "tenant_id": 7,
-  "consultation": {
-    "id": 81,
-    "external_id": "appointment:1234",
-    "status": "ended",
-    "outcome": "completed",
-    "modality": "teleconsulta",
-    "professional": { "id": 42, "crm": "123456", "crm_uf": "SP" },
-    "scheduled_at": "2026-12-10T17:00:00.000Z",
-    "admitted_at": "2026-12-10T17:02:00.000Z",
-    "started_at": "2026-12-10T17:02:00.000Z",
-    "ended_at": "2026-12-10T17:30:00.000Z"
-  }
-}
-```
+All endpoints below are POST under `/api/v1/headless/patient`, with the same service/tenant credentials and the patient ability. The browser never receives the service credential.
 
-`id` is a legacy alias of `event_id`. Updates emit `consultation.updated`; transitions emit `consultation.status_changed`. Statuses: `scheduled`, `waiting`, `in_progress`, `ended`, `cancelled`. Outcomes: `completed`, `referred_in_person`, `patient_declined`, `no_show`, or null. No patient name/document is included. Joined/left times and consent details are available in the authenticated GET record, not this event.
+| Endpoint       | Input and result                                                                                                                                                    |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/session`     | `{secret}` from the patient URL fragment → patient state plus `session_secret`; no engine patient cookie is set.                                                    |
+| `/state`       | `?consultation_id=81` and `X-Patient-Session` → clinic branding, patient first name, status, consent/admission flags and version/hash/body of the displayed term.   |
+| `/consent`     | Same context plus `{accepted:true,version,text_hash,recording_allowed?,representative_name?,representative_document?,client_ip,client_user_agent}` → waiting state. |
+| `/video-token` | Same context → `{token,url}` only after consent and admission.                                                                                                      |
+| `/decline`     | Same context → `ended/patient_declined`, attributed to the patient, with video closure scheduled.                                                                   |
 
-Headers: `X-OpenTelemed-Timestamp: <Unix seconds>` and `X-OpenTelemed-Signature: sha256=<64 hex digits>`. Compute HMAC-SHA256 over **timestamp + `.` + exact raw UTF-8 body** using the shared secret; never reserialize JSON before verification. This timestamp-prefixed signing format replaces body-only signing.
+On Clínica Fácil's patient page, capture the fragment once, remove it from the address bar and exchange through the BFF. Store the returned engine session securely server-side, indexed by an independent HttpOnly/Secure/SameSite session cookie per consultation; strip `session_secret` from browser JSON. Preserve the non-secret consultation selector across reloads/tabs. Send only verified request IP/user agent as consent evidence, not browser-supplied arbitrary forwarded headers. The BFF must rate-limit public secret exchange and session requests by IP/session; the engine also caps API requests at 100/minute per service user. Size polling against this shared budget; back off on 429, and use backend caching of non-secret operational state where appropriate.
 
-The receiver must reject malformed timestamp/signature, enforce absolute clock skew ≤300 seconds, decode and compare equal-length digests with `timingSafeEqual`, and verify mapped clinic + consultation + external_id. Use a unique `(connection_id, event_id)` inbox key and commit deduplication with local effects/outbox in one transaction. Return 2xx only after durable acceptance. The timestamp window alone does not stop replay within the window. Duplicate events must return success without repeating effects.
+Consent version/hash and explicit acceptance are unchanged. Legal representative fields must come as a pair. A stolen link or patient cookie grants that patient's limited flow; protect URLs from logs, analytics, referrers and previews. Reissuing a link revokes previous links/sessions, but is not video-token revocation and must not be done automatically during a call.
 
-Retries retain body/event_id, refresh timestamp/signature and can arrive out of order. GET the current consultation before applying state-dependent reconciliation; do not blindly overwrite newer state. Queue policy: six attempts, exponential backoff starting at 1 second, 10-second HTTP timeout. Monitor exhausted jobs. `pnpm ace telemed:dispatch-webhooks` recovers pending enqueue work; exhausted jobs require operator handling. Drain pending deliveries before secret rotation because each outbox row retains an encrypted secret snapshot. A periodic dispatch/reconciliation job must be operated explicitly.
+## Scheduling and export contract
 
-## End-to-end flow and Clínica Fácil changes
+Existing `/api/v1` endpoints remain: POST `/consultations`, GET/PATCH `/consultations/:id`, POST `/:id/patient-link`, POST `/:id/cancel`, GET `/:id/audit`, GET `/professionals?crm=...&crm_uf=...`. Full schemas are in OpenAPI. Create requires `professional_id`, actual `patient_name`, `patient_location`, offset-bearing `scheduled_at`; `patient_document` and `external_id` are optional. Use `external_id=appointment:<id>`.
 
-Paths in this section are relative to the read-only Clínica Fácil repository.
+Creation returns 201 `{created:true,consultation,patient_url,doctor_url:null}` for configured headless clinics. `patient_url` uses only the configured Clínica Fácil frontend URL plus a fragment secret. A valid retry with the same clinic/external_id returns 200/current record, `created:false`, `patient_url:null`; differences are ignored and no new link/event is generated. Without external_id each request creates a consultation. A lost first secret requires explicit link issuance. PATCH changes only time/professional while scheduled; it does not renew the existing link. Expiry is the later of scheduled time + 1 day and issuance + 3 hours. Cancellation is allowed before in-progress; terminal/state-incompatible actions return 409.
 
-1. Existing agenda flow confirms booking through `app/modules/agenda/services/book_appointment_service.ts`. In the same local transaction, persist a telemed creation intent; call open-telemed asynchronously after commit. Never replace agenda's capacity/idempotency/locking checks with the remote call.
-2. Resolve a verified professional mapping, send POST with `external_id=appointment:<id>`, persist remote id/status and securely deliver the returned link. Retry creation safely; explicit reissuance is a separate action when a secret was lost or expired.
-3. Send through `app/modules/whatsapp/services/send_message_service.ts` with a stable `client_request_id` for that delivery intent. Respect conversation ownership, assignment, pending-message transaction and enqueue-after-commit. Outside the 24-hour window use an approved template; a template does not reopen the window. Do not fabricate a lead/conversation for a panel booking.
-4. The patient opens the clinic-branded page, consents to the current version/hash and enters waiting. The link is exchanged for an HttpOnly cookie scoped by consultation; separate tabs remain independent. No video before consent and admission.
-5. The assigned doctor opens `doctor_url` using the existing open-telemed session/login and explicitly admits. Neither the scheduler nor a manager gains attendance rights through the integration.
-6. Receive the signed event into an inbox, reconcile the remote record and store operational outcome/timestamps. Apply agenda transitions only through its existing status service and an owner-approved mapping. Do not create or sign clinical notes automatically.
+GET exports `record_schema_version:1`, `revision`, `professional_snapshot` and `outcome_author`, besides consultation/consent/timestamps/retention. Snapshot fields: `professional_id,user_id,name,crm,crm_uf,rqe,captured_at,capture_reason`. Capture occurs at admission, or at an explicit doctor's `no_show` decision if never admitted. Later profile edits do not rewrite it. PostgreSQL rejects changing/removing a captured snapshot or finalized attribution.
 
-| Proposed change in Clínica Fácil                                                                                                            | Responsibility                                                                                                                                                                                                                         |
-| ------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| New `app/modules/telemed/` with controllers, validators, services, repositories, models, jobs and `routes.ts`                               | Connection setup, verified mappings, create/update/cancel/link commands, inbox and reconciliation; remote calls isolated in a client.                                                                                                  |
-| `app/modules/features/feature_catalog.ts`, `inertia/lib/feature_keys.ts`                                                                    | Add `telemed`, initially disabled, non-metered, depending on `agenda`; billing policy remains an owner decision.                                                                                                                       |
-| `app/modules/features/support/module_permissions.ts`, `app/modules/team/support/team_permissions.ts`                                        | Explicit configure/schedule/read/link capabilities, wired into existing feature and team enforcement. Gate by owning business in services, including jobs/webhooks; disabling does not delete records.                                 |
-| Agenda booking/status/queue services and schedule UI                                                                                        | Add telemed actions and remote state without bypassing the existing scheduling writer, status machine or attendance authorization.                                                                                                     |
-| WhatsApp send service and approved template configuration                                                                                   | Controlled server-generated delivery; account for contact versus attendee and approval/window rules.                                                                                                                                   |
-| New migrations for `telemed_connections`, `telemed_professional_links`, `telemed_consultations`, `telemed_webhook_events`, `telemed_outbox` | Encrypted credentials and one-to-one clinic mapping; scoped professional mapping; unique business/appointment and remote consultation mapping; unique connection/event inbox; durable retry intents. No schema changes were run there. |
+`outcome_author` contains `kind`, `user_id`, `external_subject`, `consultation_id`, `attributed_at`, and the frozen professional for doctor decisions. Patient refusal has kind `patient`; administrative cancellation has kind `system`, never a fabricated doctor. These are an attributed encounter summary and operational outcome, **not** a signed prescription, clinical narrative or ICP-Brasil signature. Historical data without a captured snapshot stays explicitly null; do not invent retrospective authorship. GET also exposes `video_closure` with pending/completed status, mode, attempts and `tokens_revoked`; clinical completion is not evidence of media revocation. Closure progress can change independently of the clinical revision and must still be refreshed after termination.
 
-## Invariants carried from Clínica Fácil
+## Agenda reconciliation — recommended policy
 
-- **Agenda** (`.claude/rules/agenda.md`, `agenda-assistente.md`, `agenda-assistente-paciente.md`): `appointments.attendee` identifies the patient; `customer_id` can identify someone else. Preserve source, product, professional, lead and business ownership. The assistant only prepares proposals; explicit confirmation performs booking. Existing Quark mirror and checkout guards remain authoritative.
-- **Rescheduling** (`agenda.md` and `BookAppointmentService.rescheduleOfId`): creates a **new** appointment and marks the old one `rescheduled`. Cancel the old remote consultation and create a new remote consultation with the new external_id; do not reuse it via PATCH. PATCH serves genuine in-place corrections while scheduled. If the old consultation is in progress, stop the automation and require the attending workflow; the integrator cannot end it.
-- **Professionals** (`agenda-equipe.md`, `agenda/models/professional.ts`): optional `user_id`, free-text council/registration and shared `profile_id` across local unit records are not verified CRM/UF identity. Provision doctors through the existing open-telemed panel, verify CRM/UF and persist explicit scoped ids. Never match by name or automatically parse free text as a credential. API account provisioning is deferred with auth decisions.
-- **Attendance** (`agenda-atendimento.md`, `agenda/support/appointment_status.ts`): agenda states (`scheduled`, `confirmed`, `arrived`, `in_service`, `done`, `no_show`, `cancelled`, `rescheduled`) are not identical to telemed states. A video disconnect is not automatically a completed appointment. Reconcile through the existing service after the owner defines mappings.
-- **WhatsApp/assistant** (`whatsapp.md`, `whatsapp-envio.md`, `whatsapp-assistente*.md`): preserve the 24-hour window, assignment, idempotency, human handoff and health/urgency guards. A consultation link is controlled server output, not an assistant-generated URL or a reason to broadly relax foreign-link restrictions.
-- **Features/tenancy/RBAC** (`features.md`, `tenancy.md`, `rbac.md`): root aggregate mode is not a business context; resolve the owning business before operations. Enforce backend entitlements and capabilities even when the UI hides actions; no root or manager clinician impersonation.
-- **Records** (`app/modules/patient_records/services/patient_notes_service.ts`): notes use `PATIENT_RECORDS_KEY`, are immutable and restricted to the attending author, with root denied. Store integration outcomes operationally; do not bypass that service or turn a webhook into a doctor's authored note. Future medical-record export is a separate access-controlled design.
+Use a **durable outbox/inbox workflow with separate local and remote states**, not synchronous dual writes or direct status SQL. Native booking remains owned by `BookAppointmentService`; publish remote creation intent in the same local transaction, then retry remotely with external_id. Preserve source, attendee, lead, product, professional, capacity and checkout rules. Out-of-order webhooks never overwrite the agenda directly.
 
-## Doctor entry without another login — proposal only
+| Telemed evidence                            | Recommended Clínica Fácil effect                                                                                                                                                                                                                                                          |
+| ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scheduled`                                 | Persist remote mapping and pending/delivered invitation; do not mark confirmed/arrived automatically.                                                                                                                                                                                     |
+| `waiting` after consent                     | Record remote waiting; on the appointment day transition eligible scheduled/confirmed appointments to arrived through `AppointmentStatusService`, once, respecting existing guards. Conflicts become an operational exception.                                                            |
+| Doctor chooses Admit                        | Through an authenticated doctor workflow, reserve a local intent and use existing queue/status checks to start attendance, then delegate remote admit; retry/reconcile uncertain responses. Keep a visible synchronization state; never start a second appointment for that professional. |
+| `in_progress`                               | Confirm the admission intent; never let a webhook impersonate a doctor or bypass the one-visit rule.                                                                                                                                                                                      |
+| Doctor `completed` / `referred_in_person`   | Import the authored summary, then transition the matching active native visit to done through existing services; keep referral as separate clinical/operational detail.                                                                                                                   |
+| `patient_declined`, `no_show`, cancellation | Record remote evidence; do not automatically free slots, void checkout, or mark absence without the native timing/checkout/actor checks. Queue a permitted operator action on conflict.                                                                                                   |
+| `consultation.interrupted`                  | Show interrupted/reconnect state; retain in-progress. Room shutdown alone is neither completion nor absence.                                                                                                                                                                              |
 
-Current option: existing open-telemed login/session and `doctor_url`. Proposed future option: a server-requested, signed, single-use entry ticket, expiring in 30–60 seconds, bound to issuer/audience, clinic, consultation and a verified doctor identity. Persist a nonce hash and consume it atomically. Recheck active membership, exact assigned professional and attendance permission when redeemed; never accept an arbitrary user id or grant manager impersonation. Establish a restricted session with fixation/CSRF protections; keep the ticket out of logs, referrers and analytics.
+A remarcação creates a **new** appointment (`rescheduleOfId`), marking the old rescheduled. Cancel the old remote consultation and create a new external_id; preserve a compensating intent if cancellation fails. Do not silently reuse the old consultation via PATCH. In-progress calls require the attending doctor, not integrator cancellation. On definitive remote admission failure, undo a local start only through the existing authorized undo flow and only when no clinical note or other irreversible effect exists; otherwise require an explicit reconciliation action. Initially exclude live Quark mirrors from telemed automation; their ownership/status path must be integrated separately. Do not bypass checkout, sale recording or billing effects.
 
-Risks: stolen/replayed links, service-user impersonation, stale professional mappings, cross-tenant confusion, session/cookie handling and revocation. Prefer an authenticated doctor-to-server exchange with step-up where needed over a transferable bearer link. An OIDC identity broker is an alternative with more infrastructure and clearer centralized identity lifecycle. Neither design is implemented; owner approval and a separate threat model are required.
+For exported records, create an encrypted imported-encounter artifact linked to appointment/patient and frozen remote author, unique by remote consultation/schema revision. Keep transport identity separate. Do not insert through `PatientNotesService` as if the service user authored a note: its attending-author/root-denial and immutability rules remain. A doctor may explicitly adopt/reference the artifact in their own note while authorized; administrative history view must follow patient-record access rules. Import and inbox acknowledgement share a transaction.
 
-## Questions for the owner
+## Link recipient and WhatsApp recommendation
 
-1. Approve service-account provisioning, verified CRM/UF mapping, token lifetime/rotation and allowed webhook origins; choose the future identity/SSO approach.
-2. Define agenda mappings for completion, referral, refusal, absence, cancellation and interruption, plus compensation for rescheduling when remote cancellation fails.
-3. Define delivery to contact versus attendee/representative, approved WhatsApp template, consent/location collection, Quark and paid-checkout scope.
-4. Approve feature entitlement/billing and which roles configure, schedule, reissue and read records; decide durable receiver/reconciliation operations.
-5. Decide clinical-record export, clinician identity snapshots, retention/legal responsibilities and strict video revocation/room-close retry requirements. Deleting a LiveKit room alone does not guarantee revocation of cached tokens; see the review report.
+Require **explicit recipient confirmation at booking**: patient themselves by default; an identified, authorized representative when appropriate. `appointments.attendee` is the patient and `customer_id`/WhatsApp lead may be a payer or other person; never silently equate them. Store recipient type, validated channel, appointment relation and the staff/patient confirmation. If no verified recipient/conversation exists, offer a controlled copy/send action and an operational pending-delivery state; do not invent a lead.
+
+Use `SendMessageService`, preserving assignment and transactional enqueue. Deduplicate each delivery intent with stable `client_request_id`; a deliberate reissue is a new intent. Within the active 24-hour window, send a neutral transactional message. Outside it, use a provider-approved **utility template** with date/time, clinic identity and an access button, without diagnosis, CPF or unnecessary specialty details. Suggested copy: “Sua consulta está agendada para {{date}} às {{time}}. Acesse com segurança pelo botão. Se precisar de ajuda, fale com a clínica.” Obtain template approval and verify that its URL button preserves the chosen secret-fragment link before rollout; disable previews, and fall back to an approved delivery channel if that provider configuration cannot preserve it. Never weaken consent to fit a template.
+
+Rejected: unconditional delivery to the current lead, autonomous assistant-generated links, and free text outside the window. The assistant may prepare a proposal; explicit confirmation, health/urgency handoff and foreign-link guards remain. Telemed URLs are controlled server output, not a broad link allowlist exception.
+
+## Webhooks and video closure
+
+Events contain stable `event_id` (`id` legacy alias), event/occurred_at/tenant_id, and consultation id/external_id/status/outcome/timestamps/professional CRM/UF. They now include monotonic `revision`, schema version and an author summary; CRM/UF uses the frozen snapshot when available. Events: `consultation.status_changed`, `consultation.updated`, `consultation.interrupted`. GET supplies the full attributed record; events omit patient name/document.
+
+Verify `X-OpenTelemed-Signature: sha256=<hex>` using HMAC-SHA256 of `X-OpenTelemed-Timestamp + '.' + exact raw UTF-8 body`; validate timestamp within ±300 seconds, equal-length constant-time digest comparison, mapped tenant/consultation/external_id and durable unique `(connection,event_id)`. Acknowledge 2xx after transactional inbox acceptance. Fetch/reconcile current revision, never regress it; duplicates and stale events produce no repeated side effects. Timestamp alone does not prevent replay. Six attempts, exponential backoff from 1 second, 10-second timeout, no redirects; operator allowlist `WEBHOOK_ALLOWED_ORIGINS` and production HTTPS are required. Drain queued deliveries before rotating their snapshotted secret. Keep a worker consuming `consultation-webhooks`, run `pnpm ace telemed:dispatch-webhooks` for pending dispatch, and operate exhausted-job recovery.
+
+Recommend **LiveKit Cloud with explicit revocation cutoff**, plus the implemented durable closure. Both deterministic participant identities are removed before room deletion; failures remain pending for retry. Self-hosted deletion does not revoke cached tokens. This distinction follows [LiveKit's token contract](https://docs.livekit.io/frontends/reference/tokens-grants/); real Cloud deployment still needs qualification and synchronized clocks. Do not claim strict revocation when configured as `self_hosted`. Outbox `tokens_revoked` distinguishes provider confirmation from mere room closure. Run `pnpm ace telemed:close-videos` every minute with monitoring, and `pnpm ace telemed:prune-assertions` periodically. No client-only disconnect or short initial TTL is accepted as proof of revocation.
+
+## Clínica Fácil implementation ticket
+
+- Add `app/modules/telemed/` with its controller → service → repository → model boundaries, client, signer, patient BFF, webhook inbox, outbox/reconciliation jobs and `routes.ts`. Add doctor/patient React pages and typed `app/types/inertia.ts` props, native Clínica Fácil navigation and LiveKit components.
+- Extend `app/modules/features/feature_catalog.ts` and `inertia/lib/feature_keys.ts` with initially disabled `telemed`, requiring `agenda`; wire `features/support/module_permissions.ts` and `team/support/team_permissions.ts`. Enforce owning-business entitlement in services/jobs as well as routes. Billing policy stays explicit, not inferred from a video event.
+- Integrate `agenda/services/book_appointment_service.ts`, `appointment_status_service.ts`, `queue_call_service.ts` and schedule UI without replacing their locks/guards. Extend `whatsapp/services/send_message_service.ts` integration and approved template configuration; preserve its ownership/window/idempotency rules.
+- Add migrations for encrypted connections/private keys, verified professional mappings, consultation mappings + revision/local sync state, recipient confirmation/delivery intents, unique webhook inbox, durable outbox and encrypted imported encounter artifacts. Reuse patient-record access checks; do not weaken immutable authored notes.
+- Acceptance must cover no second login/no engine branding, patient/representative distinction, replay/tampering/foreign clinician, retry-after-timeout, out-of-order revisions, Quark/checkout refusal, template delivery and verified terminal video revocation. No Clínica Fácil schema/runtime changes were made in this task.
+
+Relevant invariants: `.claude/rules/agenda.md`, `agenda-atendimento.md`, `agenda-equipe.md`, `agenda-assistente*.md`, `whatsapp.md`, `whatsapp-envio.md`, `whatsapp-assistente*.md`, `features.md`, `tenancy.md`, `rbac.md`; implementations in agenda, WhatsApp, team, features and `patient_records/services/patient_notes_service.ts` grounded the recommendations above.
