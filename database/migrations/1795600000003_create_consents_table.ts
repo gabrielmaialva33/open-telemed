@@ -21,7 +21,7 @@ export default class extends BaseSchema {
     })
     if (this.db.dialect.name === 'postgres') {
       this.schema.raw(
-        `CREATE FUNCTION prevent_consents_mutation() RETURNS trigger AS $$ BEGIN  RAISE EXCEPTION 'consents records are immutable'; END; $$ LANGUAGE plpgsql`
+        `CREATE OR REPLACE FUNCTION prevent_consents_mutation() RETURNS trigger AS $$ BEGIN  RAISE EXCEPTION 'consents records are immutable'; END; $$ LANGUAGE plpgsql`
       )
       this.schema.raw(
         `CREATE TRIGGER immutable_consents BEFORE UPDATE OR DELETE ON consents FOR EACH ROW EXECUTE FUNCTION prevent_consents_mutation()`

@@ -46,7 +46,7 @@ export default class extends BaseSchema {
     })
     if (this.db.dialect.name === 'postgres') {
       this.schema.raw(
-        `CREATE FUNCTION prevent_audit_logs_mutation() RETURNS trigger AS $$ BEGIN IF OLD.resource <> 'consultations' THEN IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF; END IF; RAISE EXCEPTION 'audit_logs records are immutable'; END; $$ LANGUAGE plpgsql`
+        `CREATE OR REPLACE FUNCTION prevent_audit_logs_mutation() RETURNS trigger AS $$ BEGIN IF OLD.resource <> 'consultations' THEN IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF; END IF; RAISE EXCEPTION 'audit_logs records are immutable'; END; $$ LANGUAGE plpgsql`
       )
       this.schema.raw(
         `CREATE TRIGGER immutable_audit_logs BEFORE UPDATE OR DELETE ON audit_logs FOR EACH ROW EXECUTE FUNCTION prevent_audit_logs_mutation()`

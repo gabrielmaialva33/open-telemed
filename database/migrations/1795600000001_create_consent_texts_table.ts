@@ -13,7 +13,7 @@ export default class extends BaseSchema {
     })
     if (this.db.dialect.name === 'postgres') {
       this.schema.raw(
-        `CREATE FUNCTION prevent_consent_texts_mutation() RETURNS trigger AS $$ BEGIN  RAISE EXCEPTION 'consent_texts records are immutable'; END; $$ LANGUAGE plpgsql`
+        `CREATE OR REPLACE FUNCTION prevent_consent_texts_mutation() RETURNS trigger AS $$ BEGIN  RAISE EXCEPTION 'consent_texts records are immutable'; END; $$ LANGUAGE plpgsql`
       )
       this.schema.raw(
         `CREATE TRIGGER immutable_consent_texts BEFORE UPDATE OR DELETE ON consent_texts FOR EACH ROW EXECUTE FUNCTION prevent_consent_texts_mutation()`
