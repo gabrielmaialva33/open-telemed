@@ -100,7 +100,7 @@ sequenceDiagram
     participant P as Paciente
     participant M as Médico
     participant LK as LiveKit
-    Note over I,OT: Headless: paciente e médico usam UI/backend do integrador; doctor_url é null
+    Note over I,OT: Headless: paciente e médico usam UI/backend do integrador, então doctor_url é null
     I->>OT: POST /api/v1/consultations
     OT-->>I: patient_url + doctor_url
     I->>P: envia o link (WhatsApp, e-mail...)
