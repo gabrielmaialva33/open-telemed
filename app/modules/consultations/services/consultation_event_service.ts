@@ -38,10 +38,22 @@ export default class ConsultationEventService {
     userId?: number,
     event = 'consultation.status_changed'
   ) {
-    await this.audit(c, event === 'consultation.updated' ? 'updated' : c.status, trx, userId, {
-      status: c.status,
-      outcome: c.outcome,
-    })
+    c.revision = (c.revision ?? 0) + 1
+    await c.useTransaction(trx).save()
+    await this.audit(
+      c,
+      event === 'consultation.updated'
+        ? 'updated'
+        : event === 'consultation.interrupted'
+          ? 'interrupted'
+          : c.status,
+      trx,
+      userId,
+      {
+        status: c.status,
+        outcome: c.outcome,
+      }
+    )
     if (c.outcome) await this.audit(c, 'outcome', trx, userId, { outcome: c.outcome })
     const tenant = await Tenant.findOrFail(c.tenant_id, { client: trx })
     if (!tenant.webhook_url || !tenant.webhook_secret) return
@@ -58,11 +70,24 @@ export default class ConsultationEventService {
       tenant_id: c.tenant_id,
       consultation: {
         id: c.id,
+        revision: c.revision,
+        record_schema_version: 1,
+        outcome_author: c.outcome_author
+          ? {
+              kind: c.outcome_author.kind,
+              user_id: c.outcome_author.user_id,
+              attributed_at: c.outcome_author.attributed_at,
+            }
+          : null,
         external_id: c.external_id,
         status: c.status,
         outcome: c.outcome,
         modality: 'teleconsulta',
-        professional: { id: professional.id, crm: professional.crm, crm_uf: professional.crm_uf },
+        professional: {
+          id: professional.id,
+          crm: c.professional_snapshot?.crm ?? professional.crm,
+          crm_uf: c.professional_snapshot?.crm_uf ?? professional.crm_uf,
+        },
         admitted_at: c.admitted_at?.toISO() ?? null,
         scheduled_at: c.scheduled_at.toISO(),
         started_at: c.started_at?.toISO() ?? null,
