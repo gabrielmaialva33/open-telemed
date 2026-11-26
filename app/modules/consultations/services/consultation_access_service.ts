@@ -6,12 +6,14 @@ import ForbiddenException from '#exceptions/forbidden_exception'
 import PermissionService from '#modules/permissions/services/permission_service'
 import Consultation from '#modules/consultations/models/consultation'
 import OwnershipService from '#shared/services/ownership_service'
+import HeadlessRepository from '#modules/headless/repositories/headless_repository'
 
 @inject()
 export default class ConsultationAccessService {
   constructor(
     private permissions: PermissionService,
-    private ownership: OwnershipService
+    private ownership: OwnershipService,
+    private headless: HeadlessRepository
   ) {}
 
   async isManager(ctx: HttpContext) {
@@ -33,7 +35,8 @@ export default class ConsultationAccessService {
         permission.action === 'attend' &&
         ['own', 'any'].includes(permission.context)
     )
-    if (!allowed || !ctx.tenant) return new Set<number>()
+    if (!allowed || !ctx.tenant || (await this.headless.connection(ctx.tenant.id)))
+      return new Set<number>()
     const professionals = await Professional.query()
       .where('tenant_id', ctx.tenant.id)
       .where('user_id', userId)
@@ -56,7 +59,11 @@ export default class ConsultationAccessService {
   }
 
   async canAttend(ctx: HttpContext, consultation: Consultation) {
-    if (consultation.tenant_id !== ctx.tenant?.id) return false
+    if (
+      consultation.tenant_id !== ctx.tenant?.id ||
+      (await this.headless.connection(consultation.tenant_id))
+    )
+      return false
     const userId = ctx.auth.getUserOrFail().id
     // Clinical identity is mandatory, even for administrators and broad legacy grants.
     if (

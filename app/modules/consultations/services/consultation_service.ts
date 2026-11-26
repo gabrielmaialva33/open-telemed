@@ -2,7 +2,6 @@ import { inject } from '@adonisjs/core'
 import { Exception } from '@adonisjs/core/exceptions'
 import { HttpContext } from '@adonisjs/core/http'
 import db from '@adonisjs/lucid/services/db'
-import logger from '@adonisjs/core/services/logger'
 import { DateTime } from 'luxon'
 import { randomBytes, createHash } from 'node:crypto'
 import ConsultationRepository from '#modules/consultations/repositories/consultation_repository'
@@ -17,6 +16,11 @@ import Consent from '#modules/consents/models/consent'
 import AuditLog from '#modules/audits/models/audit_log'
 import VideoService from '#shared/services/video_service'
 import env from '#start/env'
+import ClinicalRecordService, {
+  type OutcomeActor,
+} from '#modules/consultations/services/clinical_record_service'
+import VideoClosureService from '#modules/consultations/services/video_closure_service'
+import HeadlessRepository from '#modules/headless/repositories/headless_repository'
 import type { TransactionClientContract } from '@adonisjs/lucid/types/database'
 import type { Infer } from '@vinejs/vine/types'
 import {
@@ -35,7 +39,10 @@ export default class ConsultationService {
     private repository: ConsultationRepository,
     private access: ConsultationAccessService,
     private events: ConsultationEventService,
-    private video: VideoService
+    private video: VideoService,
+    private records: ClinicalRecordService,
+    private closures: VideoClosureService,
+    private headless: HeadlessRepository
   ) {}
 
   async visibleQuery(ctx: HttpContext) {
@@ -72,10 +79,35 @@ export default class ConsultationService {
       .firstOrFail()
     const user = await User.findOrFail(p.user_id)
     const consent = await Consent.findBy('consultation_id', c.id)
+    const closure = await db
+      .from('video_closures')
+      .where('tenant_id', c.tenant_id)
+      .where('consultation_id', c.id)
+      .first()
     return {
       ...c.toRecord(),
+      ...this.records.export(c),
+      video_closure: closure
+        ? {
+            status: closure.completed_at ? ('completed' as const) : ('pending' as const),
+            mode: closure.mode as 'cloud' | 'self_hosted',
+            tokens_revoked: Boolean(closure.tokens_revoked),
+            attempts: Number(closure.attempts),
+            completed_at: closure.completed_at
+              ? new Date(closure.completed_at).toISOString()
+              : null,
+          }
+        : null,
       modality: 'teleconsulta',
-      professional: { id: p.id, name: user.full_name, crm: p.crm, crm_uf: p.crm_uf, rqe: p.rqe },
+      professional: c.professional_snapshot
+        ? {
+            id: c.professional_snapshot.professional_id,
+            name: c.professional_snapshot.name,
+            crm: c.professional_snapshot.crm,
+            crm_uf: c.professional_snapshot.crm_uf,
+            rqe: c.professional_snapshot.rqe,
+          }
+        : { id: p.id, name: user.full_name, crm: p.crm, crm_uf: p.crm_uf, rqe: p.rqe },
       consent: consent
         ? {
             version: consent.version,
@@ -124,7 +156,9 @@ export default class ConsultationService {
       created: result.created,
       consultation: await this.record(result.consultation),
       patient_url: result.patientUrl,
-      doctor_url: `${env.get('APP_URL')}/consultations/${result.consultation.id}/room`,
+      doctor_url: (await this.headless.connection(ctx.tenant!.id))
+        ? null
+        : `${env.get('APP_URL')}/consultations/${result.consultation.id}/room`,
     }
   }
 
@@ -155,6 +189,11 @@ export default class ConsultationService {
       { client: trx }
     )
     const tenant = await Tenant.findOrFail(c.tenant_id, { client: trx })
+    const connection = await this.headless.connection(c.tenant_id, trx)
+    if (connection) {
+      if (!connection.active) conflict('Integração desabilitada.')
+      return `${connection.patient_url}#${secret}`
+    }
     const origin = tenant.custom_hosts?.[0]
       ? `https://${tenant.custom_hosts[0]}`
       : env.get('APP_URL')
@@ -198,9 +237,19 @@ export default class ConsultationService {
 
   async admit(ctx: HttpContext) {
     const c = await this.get(ctx, 'attend')
+    return this.admitFor(c, ctx.auth.getUserOrFail().id, (locked, trx) =>
+      this.access.assertAssignedProfessional(ctx, locked, trx)
+    )
+  }
+
+  async admitFor(
+    c: Consultation,
+    userId: number,
+    authorize: (c: Consultation, trx: TransactionClientContract) => Promise<unknown>
+  ) {
     const result = await db.transaction(async (trx) => {
       const locked = await this.repository.find(c.tenant_id, c.id, trx)
-      await this.access.assertAssignedProfessional(ctx, locked, trx)
+      await authorize(locked, trx)
       const consent = await Consent.query({ client: trx }).where('consultation_id', c.id).first()
       if (locked.status !== 'waiting' || !consent)
         conflict('O paciente precisa consentir e entrar na espera antes da admissão.')
@@ -209,9 +258,10 @@ export default class ConsultationService {
         admitted_at: DateTime.utc(),
         started_at: DateTime.utc(),
       })
+      await this.records.capture(locked, trx)
       await locked.save()
-      await this.events.audit(locked, 'admitted', trx, ctx.auth.getUserOrFail().id)
-      await this.events.status(locked, trx, ctx.auth.getUserOrFail().id)
+      await this.events.audit(locked, 'admitted', trx, userId)
+      await this.events.status(locked, trx, userId)
       return locked
     })
     await this.events.dispatchPending()
@@ -220,19 +270,23 @@ export default class ConsultationService {
 
   async doctorToken(ctx: HttpContext) {
     const c = await this.get(ctx, 'attend')
-    if (
-      c.status !== 'in_progress' ||
-      !c.admitted_at ||
-      !(await Consent.findBy('consultation_id', c.id))
-    )
-      conflict('A consulta ainda não foi admitida.')
-    const p = await Professional.query()
-      .where('tenant_id', c.tenant_id)
-      .where('id', c.professional_id)
-      .firstOrFail()
-    const user = await User.findOrFail(p.user_id)
-    return this.video.token(c.tenant_id, c.id, 'doctor', user.full_name, (locked, trx) =>
+    return this.doctorTokenFor(c, ctx.auth.getUserOrFail().id, (locked, trx) =>
       this.access.assertAssignedProfessional(ctx, locked, trx)
+    )
+  }
+
+  async doctorTokenFor(
+    c: Consultation,
+    userId: number,
+    authorize: (c: Consultation, trx: TransactionClientContract) => Promise<unknown>
+  ) {
+    const user = await User.findOrFail(userId)
+    return this.video.token(
+      c.tenant_id,
+      c.id,
+      'doctor',
+      c.professional_snapshot?.name ?? user.full_name,
+      authorize
     )
   }
 
@@ -241,7 +295,8 @@ export default class ConsultationService {
     status: 'ended' | 'cancelled',
     outcome: Consultation['outcome'],
     userId?: number,
-    authorize?: (c: Consultation, trx: TransactionClientContract) => Promise<unknown>
+    authorize?: (c: Consultation, trx: TransactionClientContract) => Promise<unknown>,
+    actor?: OutcomeActor
   ) {
     const result = await db.transaction(async (trx) => {
       const locked = await this.repository.find(c.tenant_id, c.id, trx)
@@ -256,19 +311,23 @@ export default class ConsultationService {
       )
         conflict('A consulta ainda não foi iniciada.')
       locked.merge({ status, outcome, ended_at: DateTime.utc() })
+      await this.records.attributeOutcome(
+        locked,
+        actor ??
+          (outcome === 'patient_declined'
+            ? { kind: 'patient' }
+            : outcome
+              ? { kind: 'doctor', userId }
+              : { kind: 'system', userId }),
+        trx
+      )
       await locked.save()
+      await this.closures.schedule(locked, trx)
       await this.events.status(locked, trx, userId)
       return locked
     })
     await this.events.dispatchPending()
-    try {
-      await this.video.close(c.tenant_id, c.id)
-    } catch {
-      logger.warn(
-        { event: 'video_close_failed', consultationId: c.id },
-        'Não foi possível fechar a sala de vídeo'
-      )
-    }
+    await this.closures.attempt(c.tenant_id, c.id)
     return this.record(result)
   }
 

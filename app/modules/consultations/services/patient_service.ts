@@ -25,6 +25,14 @@ import {
   patientContextValidator,
 } from '#modules/consultations/validators/consultation_validator'
 import env from '#start/env'
+import HeadlessRepository from '#modules/headless/repositories/headless_repository'
+
+export type PatientTransport = {
+  tenantId: number
+  sessionSecret?: string
+  clientIp?: string
+  clientUserAgent?: string
+}
 
 @inject()
 export default class PatientService {
@@ -33,11 +41,16 @@ export default class PatientService {
     private terms: ConsentTextService,
     private events: ConsultationEventService,
     private consultations: ConsultationService,
-    private video: VideoService
+    private video: VideoService,
+    private headless: HeadlessRepository
   ) {}
 
-  private async boundClinic(ctx: HttpContext, c: Consultation) {
-    const hostClinic = await this.clinics.resolve(ctx)
+  private async boundClinic(ctx: HttpContext, c: Consultation, transport?: PatientTransport) {
+    if (!transport && (await this.headless.connection(c.tenant_id)))
+      throw new NotFoundException('Abra o link no aplicativo da clínica.')
+    if (transport && c.tenant_id !== transport.tenantId)
+      throw new NotFoundException('Consulta não encontrada.')
+    const hostClinic = transport ? null : await this.clinics.resolve(ctx)
     const clinic = await Tenant.query()
       .where('id', c.tenant_id)
       .where('is_active', true)
@@ -47,14 +60,14 @@ export default class PatientService {
     return clinic
   }
 
-  async exchange(ctx: HttpContext, secret: string) {
+  async exchange(ctx: HttpContext, secret: string, transport?: PatientTransport) {
     const link = await PatientLink.query()
       .where('secret_hash', hashSecret(secret))
       .where('expires_at', '>', DateTime.utc().toSQL()!)
       .first()
     if (!link) throw new NotFoundException('Link inválido ou expirado.')
     const c = await Consultation.findOrFail(link.consultation_id)
-    await this.boundClinic(ctx, c)
+    await this.boundClinic(ctx, c, transport)
     if (['ended', 'cancelled'].includes(c.status)) conflict('Consulta encerrada.')
     const session = randomBytes(32).toString('base64url')
     const consent = await Consent.findBy('consultation_id', c.id)
@@ -70,34 +83,39 @@ export default class PatientService {
       consent_version: term.version,
     })
     await link.save()
-    ctx.response.cookie(`telemed_patient_${c.id}`, session, {
-      httpOnly: true,
-      sameSite: 'strict',
-      secure: env.get('NODE_ENV') === 'production',
-      path: '/',
-      maxAge: '3h',
-    })
-    return this.state(ctx, c, link)
+    if (!transport)
+      ctx.response.cookie(`telemed_patient_${c.id}`, session, {
+        httpOnly: true,
+        sameSite: 'strict',
+        secure: env.get('NODE_ENV') === 'production',
+        path: '/',
+        maxAge: '3h',
+      })
+    const state = await this.state(ctx, c, link, transport)
+    return transport ? { ...state, session_secret: session } : state
   }
 
-  async session(ctx: HttpContext) {
+  async session(ctx: HttpContext, transport?: PatientTransport) {
     const { consultation_id: consultationId } = await patientContextValidator.validate(
       ctx.request.qs()
     )
     if (!consultationId)
       throw new Exception('Sessão expirada. Abra novamente o link.', { status: 401 })
-    const link = await this.validSessionLink(ctx, consultationId)
+    const link = await this.validSessionLink(ctx, consultationId, undefined, transport)
     const c = await Consultation.findOrFail(link.consultation_id)
-    await this.boundClinic(ctx, c)
+    await this.boundClinic(ctx, c, transport)
     return { c, link }
   }
 
   private async validSessionLink(
     ctx: HttpContext,
     consultationId: number,
-    trx?: TransactionClientContract
+    trx?: TransactionClientContract,
+    transport?: PatientTransport
   ) {
-    const secret = ctx.request.cookie(`telemed_patient_${consultationId}`)
+    const secret = transport
+      ? transport.sessionSecret
+      : ctx.request.cookie(`telemed_patient_${consultationId}`)
     if (typeof secret !== 'string')
       throw new Exception('Sessão expirada. Abra novamente o link.', { status: 401 })
     const link = await PatientLink.query(trx ? { client: trx } : {})
@@ -110,8 +128,8 @@ export default class PatientService {
     return link
   }
 
-  async state(ctx: HttpContext, c: Consultation, link: PatientLink) {
-    const clinic = await this.boundClinic(ctx, c)
+  async state(ctx: HttpContext, c: Consultation, link: PatientLink, transport?: PatientTransport) {
+    const clinic = await this.boundClinic(ctx, c, transport)
     const consent = await Consent.findBy('consultation_id', c.id)
     const term = await ConsentText.query()
       .where('tenant_id', c.tenant_id)
@@ -133,8 +151,12 @@ export default class PatientService {
     }
   }
 
-  async accept(ctx: HttpContext, payload: Infer<typeof patientConsentValidator>) {
-    const { c } = await this.session(ctx)
+  async accept(
+    ctx: HttpContext,
+    payload: Infer<typeof patientConsentValidator>,
+    transport?: PatientTransport
+  ) {
+    const { c } = await this.session(ctx, transport)
     if (Boolean(payload.representative_name) !== Boolean(payload.representative_document))
       throw new Exception('Informe nome e documento do representante legal.', { status: 422 })
     await db.transaction(async (trx) => {
@@ -143,7 +165,7 @@ export default class PatientService {
         .where('id', c.id)
         .forUpdate()
         .firstOrFail()
-      const link = await this.validSessionLink(ctx, c.id, trx)
+      const link = await this.validSessionLink(ctx, c.id, trx, transport)
       if (locked.status !== 'scheduled')
         conflict('O consentimento já foi registrado ou a consulta foi encerrada.')
       const term = await ConsentText.query({ client: trx })
@@ -161,8 +183,11 @@ export default class PatientService {
           version: term.version,
           text_hash: term.hash,
           accepted_at: DateTime.utc(),
-          ip: ctx.request.ip(),
-          user_agent: (ctx.request.header('user-agent') || '').slice(0, 2048),
+          ip: transport?.clientIp ?? ctx.request.ip(),
+          user_agent: (transport?.clientUserAgent ?? ctx.request.header('user-agent') ?? '').slice(
+            0,
+            2048
+          ),
           representative_name: payload.representative_name,
           representative_document: payload.representative_document,
         },
@@ -173,16 +198,22 @@ export default class PatientService {
       await this.events.audit(locked, 'consented', trx, undefined, {
         version: term.version,
         text_hash: term.hash,
+        source: transport ? 'headless' : 'public',
       })
       await this.events.status(locked, trx)
     })
     await this.events.dispatchPending()
     await c.refresh()
-    return this.state(ctx, c, await this.validSessionLink(ctx, c.id))
+    return this.state(
+      ctx,
+      c,
+      await this.validSessionLink(ctx, c.id, undefined, transport),
+      transport
+    )
   }
 
-  async token(ctx: HttpContext) {
-    const { c } = await this.session(ctx)
+  async token(ctx: HttpContext, transport?: PatientTransport) {
+    const { c } = await this.session(ctx, transport)
     if (
       c.status !== 'in_progress' ||
       !c.admitted_at ||
@@ -190,14 +221,14 @@ export default class PatientService {
     )
       conflict('Aguarde o aceite do termo e a admissão pelo médico.')
     return this.video.token(c.tenant_id, c.id, 'patient', c.patient_name, (_locked, trx) =>
-      this.validSessionLink(ctx, c.id, trx)
+      this.validSessionLink(ctx, c.id, trx, transport)
     )
   }
 
-  async decline(ctx: HttpContext) {
-    const { c } = await this.session(ctx)
+  async decline(ctx: HttpContext, transport?: PatientTransport) {
+    const { c } = await this.session(ctx, transport)
     await this.consultations.finish(c, 'ended', 'patient_declined', undefined, (_locked, trx) =>
-      this.validSessionLink(ctx, c.id, trx)
+      this.validSessionLink(ctx, c.id, trx, transport)
     )
     return { status: 'ended', outcome: 'patient_declined' }
   }
